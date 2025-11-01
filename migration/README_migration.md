@@ -43,7 +43,7 @@ python migration/load_excel_to_neon.py init-db
 
 # 3. Infer column metadata (update config.yaml)
 python migration/load_excel_to_neon.py infer \
-  --file "data/Goods Distributed View.xlsx" \
+  --file "migration/data/Goods Distributed View.xlsx" \
   --sheet "Goods Distributed View" \
   --table stg.erp_goods_distributed \
   --save-overrides migration/config.yaml
@@ -82,7 +82,7 @@ Use `--mode incremental` only after defining a reliable key in `config.yaml` or 
 2. **Infer column metadata**  
    ```bash
    python migration/load_excel_to_neon.py infer \
-     --file "data/Goods Distributed View.xlsx" \
+     --file "migration/data/Goods Distributed View.xlsx" \
      --sheet "Goods Distributed View" \
      --table stg.erp_goods_distributed \
      --save-overrides migration/config.yaml
@@ -102,7 +102,7 @@ Use `--mode incremental` only after defining a reliable key in `config.yaml` or 
 4. **Load data**  
    ```bash
    python migration/load_excel_to_neon.py load-staging \
-     --file "data/Goods Distributed View.xlsx" \
+     --file "migration/data/Goods Distributed View.xlsx" \
      --sheet "Goods Distributed View" \
      --table stg.erp_goods_distributed \
      --mode full

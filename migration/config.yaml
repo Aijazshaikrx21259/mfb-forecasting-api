@@ -5,7 +5,7 @@ defaults:
   date_tolerance_days: 2
 tables:
   stg.erp_goods_distributed:
-    file: data/Goods Distributed View.xlsx
+    file: migration/data/Goods Distributed View.xlsx
     sheet: Goods Distributed View
     allow_new_columns: true
     incremental_key: null
