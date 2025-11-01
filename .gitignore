@@ -129,6 +129,7 @@ htmlcov/
 .tox/
 .pytest_cache/
 .hypothesis/
+test_api
 
 # Jupyter Notebook
 .ipynb_checkpoints
