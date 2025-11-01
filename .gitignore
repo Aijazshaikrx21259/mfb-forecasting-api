@@ -167,4 +167,5 @@ credentials.json
 service-account.json
 
 # Data files
-data/Goods Distributed View.xlsx
+migration/data/
+migration/data/Goods Distributed View.xlsx
