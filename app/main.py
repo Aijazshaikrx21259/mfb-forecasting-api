@@ -18,10 +18,6 @@ def create_application() -> FastAPI:
         title="MFB Forecasting API",
         description="Service providing health monitoring and forecasting capabilities.",
         version="0.1.0",
-        contact={
-            "name": "Platform Engineering",
-            "email": "platform@example.com",
-        },
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
