@@ -165,3 +165,6 @@ secrets/
 *.cert
 credentials.json
 service-account.json
+
+# Data files
+data/Goods Distributed View.xlsx
