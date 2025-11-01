@@ -4,4 +4,8 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-local}
+      - API_KEY=${API_KEY:-}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
 
