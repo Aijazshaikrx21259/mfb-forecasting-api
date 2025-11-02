@@ -71,15 +71,15 @@ python migration/load_excel_to_neon.py reset-data \
   --drop-analytics-view
 ```
 
-Use `--mode incremental` only after defining a reliable key in `config.yaml` or via CLI overrides.
+Use `--mode incremental` only after defining a reliable key in `config.yaml` or via CLI overrides. Regardless of mode, each run logs a checksum row in `stg.load_batch_log` so the analytics step can flag partial periods automatically.
 
-1. **Bootstrap schemas**
+1. **Bootstrap schemas + quality control tables**
 
    ```bash
    python migration/load_excel_to_neon.py init-db
    ```
 
-   Creates `stg`, `core`, `analytics`, and helper table `stg._column_name_map`.
+   Creates `stg`, `core`, `analytics`, helper table `stg._column_name_map`, the new `stg.load_batch_log`, and quality objects (`core.dim_calendar_month`, `core.data_quality_issue`, `analytics.month_quality_flag`, `analytics.system_anomaly_candidates`).
 
 2. **Infer column metadata**
 
@@ -105,7 +105,7 @@ Use `--mode incremental` only after defining a reliable key in `config.yaml` or 
    - Ensures PK/unique constraints (based on config).
    - Loads header mappings into `stg._column_name_map`.
 
-4. **Load data**
+4. **Load data (with batch logging)**
 
    ```bash
    python migration/load_excel_to_neon.py load-staging \
@@ -115,7 +115,7 @@ Use `--mode incremental` only after defining a reliable key in `config.yaml` or 
      --mode full
    ```
 
-   - Full refresh truncates and reloads using PostgreSQL `COPY` in 50k-row chunks.
+   - Full refresh truncates and reloads using PostgreSQL `COPY` in 50k-row chunks and records a summary row in `stg.load_batch_log` (month key, source file, record count, checksum) so partial periods and schema drifts can be detected later in analytics.
    - Switch to `--mode incremental` only after defining keys in the config or via CLI flags.
    - Keep commands on a single line (or escape newlines with `\`) when paths contain spaces like `"Goods Distributed View.xlsx"`.
    - Flags:
@@ -124,27 +124,30 @@ Use `--mode incremental` only after defining a reliable key in `config.yaml` or 
      - `--dry-run` prints load plan and exits.
      - `--force` bypasses row-count sanity guard.
 
-5. **Promote to core schema**
+5. **Promote to core schema + build monthly snapshot**
    ```bash
    python migration/load_excel_to_neon.py promote-core
    ```
-   Executes `sql/promote_core.sql`:
+   Executes `sql/promote_core.sql` followed by `sql/build_core_summaries.sql`:
    - Copies rows from `stg.erp_goods_distributed` into `core.fact_goods_distributed`.
+   - Adds derived columns (`transaction_date`, `transaction_month_start`, `month_key`, `agency_internal_id`, `is_negative_movement`, `is_zero_or_missing_qty`).
+   - Builds `core.monthly_item_agency_snapshot`, the aggregated table used for anomaly detection and baseline calculations.
 
 - Trims text columns, casts numerics, normalises `transaction_date` to `date` when present.
 - Maintains a unique index on `(item_id, transaction_date)` when those columns exist.
 
-6. **Build analytics layer**
+6. **Build analytics layer + anomaly candidates**
 
 ```bash
 python migration/load_excel_to_neon.py build-analytics
 ```
 
-Runs the analytics stage in three parts:
+Runs the analytics stage in four parts:
 
-- Maintains calendar helper `core.dim_month` (generate_series up to 12–18 months ahead).
+- Maintains calendar helpers `core.dim_month` and `core.dim_calendar_month` (generate_series up to 12–18 months ahead).
 - Refreshes `core.dim_item` with `first_seen_at` / `last_seen_at` metadata and activity flags.
 - Rebuilds `analytics.item_month_demand` plus the legacy `analytics.item_monthly_purchases` view.
+- Populates the quality layer: `analytics.item_agency_monthly_actuals`, `analytics.system_anomaly_candidates`, merges system flags into `analytics.month_quality_flag`, and refreshes the training view `analytics.v_forecast_training_base`.
 
 The command emits a JSON summary containing the `build_run_id`, item/month counts, and the min/max month range produced so CI jobs can assert row volumes.
 

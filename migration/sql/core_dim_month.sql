@@ -9,6 +9,18 @@ CREATE TABLE IF NOT EXISTS core.dim_month (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS core.dim_calendar_month (
+    month_key text PRIMARY KEY,
+    accounting_period_name text,
+    period_start_date date NOT NULL,
+    period_end_date date NOT NULL,
+    calendar_year integer NOT NULL,
+    calendar_month integer NOT NULL,
+    data_source text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 WITH bounds AS (
     SELECT
         date_trunc('month', MIN(src_month))::date AS min_month,
@@ -51,5 +63,37 @@ SET
     month_key = EXCLUDED.month_key,
     year = EXCLUDED.year,
     month_no = EXCLUDED.month_no,
+    updated_at = now();
+
+INSERT INTO core.dim_calendar_month (
+    month_key,
+    accounting_period_name,
+    period_start_date,
+    period_end_date,
+    calendar_year,
+    calendar_month,
+    data_source,
+    created_at,
+    updated_at
+)
+SELECT
+    to_char(cm.month_start, 'YYYY-MM') AS month_key,
+    to_char(cm.month_start, 'Mon-YY') AS accounting_period_name,
+    cm.month_start AS period_start_date,
+    (cm.month_start + INTERVAL '1 month - 1 day')::date AS period_end_date,
+    EXTRACT(YEAR FROM cm.month_start)::integer AS calendar_year,
+    EXTRACT(MONTH FROM cm.month_start)::integer AS calendar_month,
+    'ERP' AS data_source,
+    now() AS created_at,
+    now() AS updated_at
+FROM core.dim_month cm
+ON CONFLICT (month_key) DO UPDATE
+SET
+    accounting_period_name = EXCLUDED.accounting_period_name,
+    period_start_date = EXCLUDED.period_start_date,
+    period_end_date = EXCLUDED.period_end_date,
+    calendar_year = EXCLUDED.calendar_year,
+    calendar_month = EXCLUDED.calendar_month,
+    data_source = EXCLUDED.data_source,
     updated_at = now();
 
