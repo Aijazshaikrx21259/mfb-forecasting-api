@@ -76,3 +76,55 @@ User story 3 introduces a control layer so forecasters can mark anomalous months
 - `GET /api/data-quality/candidates` – retrieve anomaly candidates detected by the nightly build so that analysts can confirm them.
 
 All endpoints read and write the Neon tables created by the migration CLI (`analytics.month_quality_flag`, `analytics.system_anomaly_candidates`, and related core tables). Ensure the CLI has run through `build-analytics` so those tables are populated before issuing API requests.
+
+### Example workflow
+
+1. **Start the API with database access**
+
+   ```bash
+   export API_KEY=change-me
+   export DATABASE_URL="postgresql://neondb_owner:secret@your-host/neondb?sslmode=require&channel_binding=require"
+   uv run uvicorn app.main:app --reload
+   ```
+
+2. **Create a manual flag**
+
+   ```bash
+   curl -X POST http://127.0.0.1:8000/api/data-quality/flags \
+     -H "Content-Type: application/json" \
+     -H "X-API-Key: $API_KEY" \
+     -d '{
+       "month_key": "2023-03",
+       "agency_internal_id": "A-100",
+       "item_id": "P-352101",
+       "flag_type": "ANOMALY",
+       "flag_reason": "Manual anomaly test for March 2023",
+       "expires_at_utc": "2025-11-02T13:15:32.706Z"
+     }'
+   ```
+
+3. **Inspect flags**
+
+   ```bash
+   curl -H "X-API-Key: $API_KEY" \
+     "http://127.0.0.1:8000/api/data-quality/flags?month_key=2023-03"
+   ```
+
+   Add `&include_inactive=true` to see previously deactivated rows.
+
+4. **Deactivate the flag** (replace `FLAG_ID` with the value returned above)
+
+   ```bash
+   curl -X POST http://127.0.0.1:8000/api/data-quality/flags/deactivate \
+     -H "Content-Type: application/json" \
+     -H "X-API-Key: $API_KEY" \
+     -d '{"flag_id": "FLAG_ID"}'
+   ```
+
+5. **Review system anomaly candidates**
+   ```bash
+   curl -H "X-API-Key: $API_KEY" \
+     "http://127.0.0.1:8000/api/data-quality/candidates?month_key=2023-03"
+   ```
+
+These calls complete the manual override loop and verify that the Neon-backed control tables are wired correctly.

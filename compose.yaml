@@ -8,4 +8,4 @@ services:
       - ENVIRONMENT=${ENVIRONMENT:-local}
       - API_KEY=${API_KEY:-}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
-
+      - DATABASE_URL=${DATABASE_URL:-}
