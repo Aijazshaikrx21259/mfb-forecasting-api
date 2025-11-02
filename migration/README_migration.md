@@ -151,6 +151,21 @@ Runs the analytics stage in four parts:
 
 The command emits a JSON summary containing the `build_run_id`, item/month counts, and the min/max month range produced so CI jobs can assert row volumes.
 
+### Dev-only backtest queue stub
+
+For local development you can create a minimal backtest queue by applying `sql/local_backtest_stub.sql` to your database. This script:
+
+- Creates lightweight queue tables (`core.backtest_run_queue`, `core.backtest_job_queue`) plus placeholder result tables so the FastAPI `/api/backtest/*` endpoints have something to read.
+- Installs a stubbed `core.enqueue_backtest_run(int[], int, int)` that enqueues a few example item IDs and returns queue counts. Replace the `ITEM-1`… array with a query over `analytics.item_month_demand` for richer tests.
+
+Run it with:
+
+```bash
+psql "$DATABASE_URL" -f migration/sql/local_backtest_stub.sql
+```
+
+After loading the stub, restart the API (or use `docker compose up --build`) and call `POST /api/backtest/run` to verify real `run_id` values are returned. Seed the result tables manually or hook up a local worker to simulate the production backtest pipeline.
+
 7. **Reset data (optional)**
 
 ```bash
