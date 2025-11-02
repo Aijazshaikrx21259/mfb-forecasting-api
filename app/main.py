@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.config import get_settings
 from app.db import close_db_pool, init_db_pool
-from app.routers import data_quality, health
+from app.routers import backtest, data_quality, health
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ def create_application() -> FastAPI:
     app.add_middleware(CORSMiddleware, **cors_kwargs)
 
     app.include_router(health.router)
+    app.include_router(backtest.router)
     app.include_router(data_quality.router)
 
     @app.on_event("startup")
