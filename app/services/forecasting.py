@@ -26,6 +26,7 @@ SEASON_LENGTH = 12
 TIE_TOLERANCE = 1.0  # percentage points of MAPE considered indistinguishable
 TSB_ALPHA_D = 0.15
 TSB_ALPHA_P = 0.1
+PREDICTION_INTERVAL_LEVEL = 80
 
 DEMAND_CLASS_LABELS = ("SMOOTH", "ERRATIC", "INTERMITTENT", "LUMPY")
 
@@ -105,6 +106,30 @@ def _nan_to_none(value: float | None) -> float | None:
     if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
         return None
     return value
+
+
+def _locate_interval_column(columns: Iterable[str], base: str, side: str, level: int) -> str | None:
+    """Return the column name that matches a StatsForecast interval output."""
+
+    candidates = [
+        f"{base}-{side}-{level}",
+        f"{base}_{side}_{level}",
+        f"{base.lower()}-{side}-{level}",
+        f"{base.lower()}_{side}_{level}",
+    ]
+
+    column_set = set(columns)
+    for candidate in candidates:
+        if candidate in column_set:
+            return candidate
+
+    target = f"{base}-{side}-{level}".replace("_", "-").lower()
+    for column in columns:
+        normalized = column.replace("_", "-").lower()
+        if normalized == target:
+            return column
+
+    return None
 
 
 def _zero_run_lengths(values: Sequence[float]) -> list[int]:
@@ -868,7 +893,14 @@ class ForecastingService:
                 elif method == "CrostonSBA":
                     model = CrostonSBA()
                 elif method == "TSB":
-                    model = TSB(alpha_d=TSB_ALPHA_D, alpha_p=TSB_ALPHA_P)
+                    from statsforecast.utils import ConformalIntervals
+
+                    conformal = ConformalIntervals(n_windows=5, h=max_h)
+                    model = TSB(
+                        alpha_d=TSB_ALPHA_D,
+                        alpha_p=TSB_ALPHA_P,
+                        prediction_intervals=conformal,
+                    )
                 else:
                     logger.warning("Unknown champion method %s for %s", method, item_id)
                     continue
@@ -883,7 +915,7 @@ class ForecastingService:
 
                 try:
                     sf = StatsForecast(models=[model], freq="MS", n_jobs=1)
-                    forecast_df = sf.forecast(df=df, h=max_h)
+                    forecast_df = sf.forecast(df=df, h=max_h, level=[PREDICTION_INTERVAL_LEVEL])
                 except Exception as exc:  # pragma: no cover - upstream behaviour
                     logger.exception("Forecast generation failed for %s (%s): %s", item_id, method, exc)
                     continue
@@ -892,6 +924,12 @@ class ForecastingService:
                     continue
 
                 mean_col = method
+                lower_col = _locate_interval_column(
+                    forecast_df.columns, mean_col, "lo", PREDICTION_INTERVAL_LEVEL
+                )
+                upper_col = _locate_interval_column(
+                    forecast_df.columns, mean_col, "hi", PREDICTION_INTERVAL_LEVEL
+                )
 
                 forecast_df = forecast_df.sort_values("ds").reset_index(drop=True)
 
@@ -902,8 +940,8 @@ class ForecastingService:
                     champion = horizon_map[horizon]
                     period_date = pd.Timestamp(row["ds"]).to_pydatetime().date()
                     p50 = _nan_to_none(float(row.get(mean_col))) if mean_col in row else None
-                    p10 = None
-                    p90 = None
+                    p10 = _nan_to_none(float(row.get(lower_col))) if lower_col and lower_col in row else None
+                    p90 = _nan_to_none(float(row.get(upper_col))) if upper_col and upper_col in row else None
                     forecast_rows.append(
                         (
                             item_id,
