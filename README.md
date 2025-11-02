@@ -219,9 +219,9 @@ psql "$DATABASE_URL" -c "SELECT COUNT(*), MIN(period_start_date), MAX(period_sta
 | ------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST` | `/api/forecast/prep/build-item-month`           | Compute ADI/CV² for every SKU, classify demand (smooth/erratic/intermittent/lumpy), and flag obsolescence gates so TSB is only considered when the probability of demand is decaying.           |
 | `POST` | `/api/forecast/train-select?h=1..4&step_size=1` | Run rolling-origin cross-validation with StatsForecast (`ETS`, `CrostonSBA`, `TSB`) alongside the seasonal naïve guardrail. Persists per-item, per-horizon metrics and the champion selections. |
-| `POST` | `/api/forecast/forecast?h=1..4&run_id=<uuid>`   | Fit the chosen champion model(s) on the full history, write p50 forecasts (and optional bands) to `analytics.forecast_item_month`, and update run metadata.                                     |
-| `GET`  | `/api/forecast/forecasts/items/{item_id}`       | Retrieve the champion summary and time-series forecast for a specific SKU. Filters horizons via repeated `h` query parameters.                                                                  |
-| `GET`  | `/api/forecast/plan?h=1`                        | Return the first-step plan for all items (next month, by default) including the champion method and p50 prediction.                                                                             |
+| `POST` | `/api/forecast/forecast?h=1..4&run_id=<uuid>`   | Fit the chosen champion model(s) on the full history, write p50 plus conformal p10/p90 bands to `analytics.forecast_item_month`, and update run metadata.                                       |
+| `GET`  | `/api/forecast/forecasts/items/{item_id}`       | Retrieve the champion summary and time-series forecast (p50/p10/p90) for a specific SKU. Filters horizons via repeated `h` query parameters.                                                    |
+| `GET`  | `/api/forecast/plan?h=1`                        | Return the first-step plan for all items (next month, by default) including the champion method and p50/p10/p90 distribution for confidence bands.                                              |
 | `GET`  | `/api/forecast/runs/latest`                     | Display the latest run metadata: horizons, counts of evaluated items, champions beating baseline, champion distribution, and timestamps.                                                        |
 
 All responses use the real run id emitted by `train-select`; pass that id into `forecast`, `forecasts/items/{item_id}`, and `plan` when you want to interrogate a specific run.
@@ -262,7 +262,7 @@ All responses use the real run id emitted by `train-select`; pass that id into `
    }
    ```
 
-3. **Generate forecasts** – fit the selected champions and create p50 values (p10/p90 placeholders are currently `null`).
+3. **Generate forecasts** – fit the selected champions and create p50 plus 80% conformal p10/p90 bands per horizon.
 
    ```bash
    curl -X POST "http://127.0.0.1:8000/api/forecast/forecast?h=1&h=2&h=3&h=4&run_id=a9a309aa-2b75-4f29-adbc-f4d57dae7fcc" \
@@ -271,13 +271,15 @@ All responses use the real run id emitted by `train-select`; pass that id into `
 
    Example response:
 
-   ```json
-   {
-     "items_forecasted": 10,
-     "forecast_rows": 40,
-     "forecast_months": 4
-   }
-   ```
+```json
+{
+  "items_forecasted": 10,
+  "forecast_rows": 40,
+  "forecast_months": 4
+}
+```
+
+The TSB model now receives a conformal interval helper under the hood so that the API writes non-null bands even for intermittent or obsolescent series. Expect wide lower bounds (potentially negative) when historical demand is sparse; clamp in the UI if you prefer to display floor values at zero.
 
 4. **Consume results** – tap into the read endpoints with the same run id:
 
@@ -291,6 +293,28 @@ All responses use the real run id emitted by `train-select`; pass that id into `
    curl -H "X-API-Key: $API_KEY" http://127.0.0.1:8000/api/forecast/runs/latest
    ```
 
+   Example `/api/forecast/plan` response:
+
+   ```json
+   {
+     "run_id": "a9a309aa-2b75-4f29-adbc-f4d57dae7fcc",
+     "horizon": 1,
+     "items": [
+       {
+         "item_id": "P-352101",
+         "period_start_date": "2026-12-01",
+         "method": "TSB",
+         "p50": 235.86,
+         "p10": -394.78,
+         "p90": 866.5
+       }
+       // …other items ...
+     ]
+   }
+   ```
+
+   Use the p10/p90 spread to draw planning bands in the UI; clamp or relabel negative values where business rules require non-negative quantities.
+
 ### Database artifacts written by US-5
 
 | Table                           | Purpose                                                                                               |
@@ -299,7 +323,7 @@ All responses use the real run id emitted by `train-select`; pass that id into `
 | `analytics.backtest_metrics`    | Cross-validation metrics (MAPE, RMSE, fold counts) per item/horizon/method plus baseline comparisons. |
 | `analytics.item_champion`       | Champion method per item/horizon, including guardrail signal (`beats_baseline` / `needs_review`).     |
 | `analytics.forecast_run`        | Status tracker for each run (horizons, counts, champion distribution, timestamps).                    |
-| `analytics.forecast_item_month` | Forecast outputs (p50, placeholders for p10/p90) per item/horizon/period with the champion method.    |
+| `analytics.forecast_item_month` | Forecast outputs (p50, p10, p90) per item/horizon/period with the champion method.                    |
 
 ### Troubleshooting guide
 
@@ -307,7 +331,7 @@ All responses use the real run id emitted by `train-select`; pass that id into `
 | ------------------------------------------------------------ | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `503` from prep endpoint                                     | `core.item_month_demand` missing or empty              | Load your harmonised demand data, or run the dev stub (`migration/sql/local_forecast_stub.sql`).                                    |
 | `500` from train-select with `KeyError: 'model'`             | StatsForecast 1.x returns wide `cross_validation` data | The service flattens the frame automatically; ensure you are on the latest container build.                                         |
-| `500` from forecast complaining about `prediction_intervals` | Old build still requesting level bands                 | Rebuild/restart after pulling the latest code; the API now emits p50 only.                                                          |
+| `500` from forecast complaining about `prediction_intervals` | Old build still requesting level bands                 | Pull latest code and rebuild (`docker compose up --build`); the updated service wires TSB with conformal intervals for p10/p90.     |
 | Champions always TSB                                         | Demand is heavily intermittent/obsolescing             | Validate `core.item_month_demand` and guardrail metrics; adjust obsolescence thresholds in `app/services/forecasting.py` if needed. |
 
 ### Why these models?
