@@ -13,6 +13,7 @@ Commands:
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -656,12 +657,18 @@ def init_db(
     config: Optional[Path] = typer.Option(
         None, "--config", "-c", help="Path to migration config (optional)."
     ),
+    quality_sql: Path = typer.Option(
+        APP_DIR / "sql" / "init_quality_control.sql",
+        "--quality-sql",
+        help="Path to SQL file that seeds quality control tables.",
+    ),
 ) -> None:
     """Create required schemas and helper tables."""
     engine = load_engine()
     for schema in ("stg", "core", "analytics"):
         ensure_schema(engine, schema)
     ensure_column_name_map(engine)
+    run_sql_file(engine, quality_sql)
     config_store = ConfigStore(resolve_config_path(config))
     config_store.load()
     logger.info("Schemas ensured and config loaded from %s", config_store.path)
@@ -914,24 +921,178 @@ def load_staging(
 
     logger.info("Load complete: %s rows into %s.", incoming_count, table)
 
+    period_detected = None
+    month_key_detected = None
+    if "accounting_period_name" in sanitized_df.columns:
+        unique_periods = (
+            sanitized_df["accounting_period_name"].dropna().unique().tolist()
+        )
+        if len(unique_periods) == 1:
+            period_detected = str(unique_periods[0])
+    if "accounting_period_start_date" in sanitized_df.columns:
+        dates = pd.to_datetime(
+            sanitized_df["accounting_period_start_date"].dropna(),
+            utc=True,
+            errors="coerce",
+        )
+        dates = dates.dropna()
+        if not dates.empty:
+            month_keys = dates.dt.to_period("M").astype(str).unique().tolist()
+            if len(month_keys) == 1:
+                month_key_detected = month_keys[0]
+
+    metadata_payload = {
+        "sheet": sheet,
+        "mode": mode,
+        "columns": list(sanitized_df.columns),
+    }
+    checksum_source = f"{file}:{incoming_count}:{mode}".encode("utf-8")
+    checksum = hashlib.sha256(checksum_source).hexdigest()
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO stg.load_batch_log (
+                    table_name,
+                    source_file_name,
+                    record_count,
+                    load_mode,
+                    period_detected,
+                    month_key,
+                    checksum,
+                    metadata
+                )
+                VALUES (
+                    :table_name,
+                    :source_file_name,
+                    :record_count,
+                    :load_mode,
+                    :period_detected,
+                    :month_key,
+                    :checksum,
+                    CAST(:metadata AS jsonb)
+                )
+                """
+            ),
+            {
+                "table_name": table,
+                "source_file_name": str(file),
+                "record_count": incoming_count,
+                "load_mode": mode.lower(),
+                "period_detected": period_detected,
+                "month_key": month_key_detected,
+                "checksum": checksum,
+                "metadata": json.dumps(metadata_payload),
+            },
+        )
+
+    logger.info(
+        "Logged load batch for %s (%s rows, month=%s).",
+        table,
+        incoming_count,
+        month_key_detected or "unknown",
+    )
+
 
 def split_sql_statements(contents: str) -> List[str]:
     statements: List[str] = []
-    buffer: List[str] = []
-    for line in contents.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            buffer.append(line)
+    current: List[str] = []
+    in_single_quote = False
+    in_double_quote = False
+    in_line_comment = False
+    in_block_comment = False
+    dollar_tag: str | None = None
+    length = len(contents)
+    index = 0
+
+    def append_char(value: str) -> None:
+        current.append(value)
+
+    while index < length:
+        ch = contents[index]
+        next_two = contents[index : index + 2]
+
+        if in_line_comment:
+            append_char(ch)
+            if ch == "\n":
+                in_line_comment = False
+            index += 1
             continue
-        buffer.append(line)
-        if stripped.endswith(";"):
-            statement = "\n".join(buffer).strip()
-            if statement:
-                statements.append(statement.rstrip(";"))
-            buffer = []
-    trailing = "\n".join(buffer).strip()
+
+        if in_block_comment:
+            append_char(ch)
+            if next_two == "*/":
+                append_char("/")
+                index += 2
+                in_block_comment = False
+            else:
+                index += 1
+            continue
+
+        if dollar_tag is not None:
+            if contents.startswith(dollar_tag, index):
+                append_char(dollar_tag)
+                index += len(dollar_tag)
+                dollar_tag = None
+            else:
+                append_char(ch)
+                index += 1
+            continue
+
+        if ch == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            append_char(ch)
+            index += 1
+            continue
+
+        if ch == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            append_char(ch)
+            index += 1
+            continue
+
+        if not in_single_quote and not in_double_quote:
+            if next_two == "--":
+                append_char(next_two)
+                index += 2
+                in_line_comment = True
+                continue
+            if next_two == "/*":
+                append_char(next_two)
+                index += 2
+                in_block_comment = True
+                continue
+            if ch == "$":
+                end = index + 1
+                while (
+                    end < length
+                    and contents[end] not in {"$", "\n"}
+                    and (contents[end].isalnum() or contents[end] == "_")
+                ):
+                    end += 1
+                if end < length and contents[end] == "$":
+                    tag = contents[index : end + 1]
+                    append_char(tag)
+                    index = end + 1
+                    dollar_tag = tag
+                    continue
+            if ch == ";" and dollar_tag is None:
+                append_char(ch)
+                statement = "".join(current).strip()
+                if statement:
+                    statements.append(statement.rstrip(";"))
+                current = []
+                index += 1
+                continue
+
+        append_char(ch)
+        index += 1
+
+    trailing = "".join(current).strip()
     if trailing:
         statements.append(trailing)
+
     return [stmt for stmt in statements if stmt]
 
 
@@ -971,10 +1132,16 @@ def promote_core(
         "--sql-path",
         help="Path to promote_core.sql.",
     ),
+    summary_sql: Path = typer.Option(
+        APP_DIR / "sql" / "build_core_summaries.sql",
+        "--summary-sql",
+        help="Path to SQL that builds monthly summaries and aggregates.",
+    ),
 ) -> None:
     """Promote staging data into the core.fact_goods_distributed table."""
     engine = load_engine()
     run_sql_file(engine, sql_path)
+    run_sql_file(engine, summary_sql)
 
 
 @app.command("build-analytics")
@@ -999,6 +1166,11 @@ def build_analytics(
         "--dim-item-sql",
         help="Path to SQL that maintains core.dim_item.",
     ),
+    quality_sql: Path = typer.Option(
+        APP_DIR / "sql" / "analytics_quality.sql",
+        "--quality-sql",
+        help="Path to SQL that builds analytics quality control objects.",
+    ),
 ) -> None:
     """Create or refresh analytics-layer objects."""
     engine = load_engine()
@@ -1009,6 +1181,7 @@ def build_analytics(
     run_sql_file(engine, dim_item_sql)
     run_sql_file(engine, item_month_sql, {"build_run_id": build_run_id})
     run_sql_file(engine, analytics_sql)
+    run_sql_file(engine, quality_sql)
 
     with engine.begin() as conn:
         item_count = (

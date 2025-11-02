@@ -21,6 +21,7 @@ class Settings:
     api_key: str | None
     allowed_origins: list[str]
     allow_all_origins: bool
+    database_url: str | None
 
 
 @lru_cache
@@ -29,6 +30,7 @@ def get_settings() -> Settings:
 
     environment = os.getenv("ENVIRONMENT", "local")
     api_key = os.getenv("API_KEY")
+    database_url = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL")
     allowed_origins_env = _split_csv(os.getenv("ALLOWED_ORIGINS"))
     env_lower = environment.lower()
 
@@ -48,6 +50,5 @@ def get_settings() -> Settings:
         api_key=api_key,
         allowed_origins=allowed_origins,
         allow_all_origins=allow_all_origins,
+        database_url=database_url,
     )
-
-

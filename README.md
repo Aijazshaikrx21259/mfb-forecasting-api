@@ -12,6 +12,8 @@ The project ships with a `Dockerfile` and `compose.yaml` so you can run it on ma
    ```
 2. Visit the interactive Swagger UI at `http://127.0.0.1:8000/docs` (the root URL redirects there automatically) or call the health check at `http://127.0.0.1:8000/health`.
 
+When running locally, set `DATABASE_URL` to the Neon Postgres connection string if you plan to use the data-quality endpoints. The FastAPI service logs a warning and returns HTTP 503 for those endpoints when the variable is missing.
+
 To stop the containers press `Ctrl+C` and optionally remove them with `docker compose down`.
 
 ### Configure security
@@ -20,7 +22,7 @@ Endpoints and API documentation require an `X-API-Key` header when an API key is
 
 ```bash
 cp env.example .env
-# edit .env to set API_KEY and ALLOWED_ORIGINS
+# edit .env to set API_KEY, ALLOWED_ORIGINS, and DATABASE_URL
 ```
 
 Then export those variables before launching or let Docker Compose read them automatically. When you deploy to production, set `ENVIRONMENT=production` so that requests are only accepted from the `ALLOWED_ORIGINS` allowlist.
@@ -29,6 +31,7 @@ Then export those variables before launching or let Docker Compose read them aut
 API_KEY=super-secret \
 ALLOWED_ORIGINS="https://my-frontend.vercel.app" \
 ENVIRONMENT=production \
+DATABASE_URL=postgresql://user:password@host/database \
 docker compose up --build
 ```
 
@@ -62,3 +65,14 @@ If you still want to run the app directly on your host machine:
 ## Health Check
 
 The `/health` endpoint returns a simple heartbeat payload that can be used for uptime monitoring.
+
+## Data Quality Endpoints
+
+User story 3 introduces a control layer so forecasters can mark anomalous months and keep them out of model training. The FastAPI service exposes the following routes under the `/api/data-quality` prefix (all secured by the `X-API-Key` header when configured):
+
+- `POST /api/data-quality/flags` – create or update a manual month flag. Provide `month_key`, optional `agency_internal_id`/`item_id`, a `flag_type`, and a human-readable reason. When an automated flag already exists for the same scope, the system keeps its reason while activating the manual override.
+- `GET /api/data-quality/flags` – list active flags with optional filters for month, agency, and item. Pass `include_inactive=true` to review historical records.
+- `POST /api/data-quality/flags/deactivate` – deactivate a flag when the period is ready to return to training.
+- `GET /api/data-quality/candidates` – retrieve anomaly candidates detected by the nightly build so that analysts can confirm them.
+
+All endpoints read and write the Neon tables created by the migration CLI (`analytics.month_quality_flag`, `analytics.system_anomaly_candidates`, and related core tables). Ensure the CLI has run through `build-analytics` so those tables are populated before issuing API requests.
