@@ -183,6 +183,150 @@ All backtest endpoints require the database pipeline to populate the `core.backt
      "http://127.0.0.1:8000/api/backtest/items/ITEM_ID?h=1&h=2"
    ```
 
+## Forecasting Endpoints (User Story 5)
+
+User story 5 introduces a per-item model champion pipeline that evaluates intermittent demand against ETS, Croston-SBA, and TSB. The service automatically routes each series to the right method and exposes the end-to-end workflow under the `/api/forecast` prefix. Everything is protected by the `X-API-Key` header (see [Configure security](#configure-security)).
+
+### Data prerequisites
+
+1. `core.item_month_demand` must contain one row per item-month with zero-filled gaps. The champion selector reads only from this table.
+2. `analytics.item_classification`, `analytics.backtest_metrics`, `analytics.item_champion`, `analytics.forecast_item_month`, and `analytics.forecast_run` are populated by the API itself. The `migration/sql/local_forecast_stub.sql` script creates them for development environments.
+3. The Docker image already installs everything in `requirements.txt`, including StatsForecast, pandas, numpy, and scipy.
+
+To migrate the real warehouse data into the API schema, run (adjust the source view to match your environment):
+
+```bash
+psql "$DATABASE_URL" <<'SQL'
+TRUNCATE core.item_month_demand;
+
+INSERT INTO core.item_month_demand (item_id, period_start_date, demand)
+SELECT item_id,
+       month_start::date AS period_start_date,
+       demand
+FROM analytics.item_month_demand;
+SQL
+```
+
+Confirm coverage before proceeding:
+
+```bash
+psql "$DATABASE_URL" -c "SELECT COUNT(*), MIN(period_start_date), MAX(period_start_date) FROM core.item_month_demand";
+```
+
+### Endpoints overview
+
+| Method | Path                                            | Purpose                                                                                                                                                                                         |
+| ------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST` | `/api/forecast/prep/build-item-month`           | Compute ADI/CV² for every SKU, classify demand (smooth/erratic/intermittent/lumpy), and flag obsolescence gates so TSB is only considered when the probability of demand is decaying.           |
+| `POST` | `/api/forecast/train-select?h=1..4&step_size=1` | Run rolling-origin cross-validation with StatsForecast (`ETS`, `CrostonSBA`, `TSB`) alongside the seasonal naïve guardrail. Persists per-item, per-horizon metrics and the champion selections. |
+| `POST` | `/api/forecast/forecast?h=1..4&run_id=<uuid>`   | Fit the chosen champion model(s) on the full history, write p50 forecasts (and optional bands) to `analytics.forecast_item_month`, and update run metadata.                                     |
+| `GET`  | `/api/forecast/forecasts/items/{item_id}`       | Retrieve the champion summary and time-series forecast for a specific SKU. Filters horizons via repeated `h` query parameters.                                                                  |
+| `GET`  | `/api/forecast/plan?h=1`                        | Return the first-step plan for all items (next month, by default) including the champion method and p50 prediction.                                                                             |
+| `GET`  | `/api/forecast/runs/latest`                     | Display the latest run metadata: horizons, counts of evaluated items, champions beating baseline, champion distribution, and timestamps.                                                        |
+
+All responses use the real run id emitted by `train-select`; pass that id into `forecast`, `forecasts/items/{item_id}`, and `plan` when you want to interrogate a specific run.
+
+### Typical workflow (real data)
+
+1. **Prep** – compute demand classifications:
+
+   ```bash
+   curl -X POST http://127.0.0.1:8000/api/forecast/prep/build-item-month -H "X-API-Key: $API_KEY"
+   ```
+
+   Example response:
+
+   ```json
+   {
+     "items_processed": 10,
+     "intermittent_items": 10,
+     "obsolescence_candidates": 10
+   }
+   ```
+
+2. **Train & select champions** – multi-horizon rolling-origin CV (default `h=1..4`, `step_size=1`).
+
+   ```bash
+   curl -X POST "http://127.0.0.1:8000/api/forecast/train-select?h=1&h=2&h=3&h=4&step_size=1" \
+     -H "X-API-Key: $API_KEY"
+   ```
+
+   Example response:
+
+   ```json
+   {
+     "run_id": "a9a309aa-2b75-4f29-adbc-f4d57dae7fcc",
+     "items_evaluated": 10,
+     "items_with_champion": 10,
+     "champion_counts": { "TSB": 40 }
+   }
+   ```
+
+3. **Generate forecasts** – fit the selected champions and create p50 values (p10/p90 placeholders are currently `null`).
+
+   ```bash
+   curl -X POST "http://127.0.0.1:8000/api/forecast/forecast?h=1&h=2&h=3&h=4&run_id=a9a309aa-2b75-4f29-adbc-f4d57dae7fcc" \
+     -H "X-API-Key: $API_KEY"
+   ```
+
+   Example response:
+
+   ```json
+   {
+     "items_forecasted": 10,
+     "forecast_rows": 40,
+     "forecast_months": 4
+   }
+   ```
+
+4. **Consume results** – tap into the read endpoints with the same run id:
+
+   ```bash
+   curl -H "X-API-Key: $API_KEY" \
+     "http://127.0.0.1:8000/api/forecast/forecasts/items/P-352101?h=1&h=2&run_id=a9a309aa-2b75-4f29-adbc-f4d57dae7fcc"
+
+   curl -H "X-API-Key: $API_KEY" \
+     "http://127.0.0.1:8000/api/forecast/plan?h=1&run_id=a9a309aa-2b75-4f29-adbc-f4d57dae7fcc"
+
+   curl -H "X-API-Key: $API_KEY" http://127.0.0.1:8000/api/forecast/runs/latest
+   ```
+
+### Database artifacts written by US-5
+
+| Table                           | Purpose                                                                                               |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `analytics.item_classification` | ADI, CV², demand class, and obsolescence flag for every item processed by the prep endpoint.          |
+| `analytics.backtest_metrics`    | Cross-validation metrics (MAPE, RMSE, fold counts) per item/horizon/method plus baseline comparisons. |
+| `analytics.item_champion`       | Champion method per item/horizon, including guardrail signal (`beats_baseline` / `needs_review`).     |
+| `analytics.forecast_run`        | Status tracker for each run (horizons, counts, champion distribution, timestamps).                    |
+| `analytics.forecast_item_month` | Forecast outputs (p50, placeholders for p10/p90) per item/horizon/period with the champion method.    |
+
+### Troubleshooting guide
+
+| Symptom                                                      | Likely cause                                           | Remedy                                                                                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `503` from prep endpoint                                     | `core.item_month_demand` missing or empty              | Load your harmonised demand data, or run the dev stub (`migration/sql/local_forecast_stub.sql`).                                    |
+| `500` from train-select with `KeyError: 'model'`             | StatsForecast 1.x returns wide `cross_validation` data | The service flattens the frame automatically; ensure you are on the latest container build.                                         |
+| `500` from forecast complaining about `prediction_intervals` | Old build still requesting level bands                 | Rebuild/restart after pulling the latest code; the API now emits p50 only.                                                          |
+| Champions always TSB                                         | Demand is heavily intermittent/obsolescing             | Validate `core.item_month_demand` and guardrail metrics; adjust obsolescence thresholds in `app/services/forecasting.py` if needed. |
+
+### Why these models?
+
+- **ETS** handles smooth demand and is the canonical exponential smoothing family for continuous series (Hyndman & Athanasopoulos, _Forecasting: Principles and Practice_).
+- **Croston-SBA** is the bias-adjusted Croston variant recommended for intermittent demand (Nixtla StatsForecast docs).
+- **TSB (Teunter-Syntetos-Babai)** updates demand probability each period, providing natural decay for obsolescence.
+- All models come from [StatsForecast](https://nixtlaverse.nixtla.io/statsforecast/index.html); the API runs rolling-origin CV against a seasonal naïve benchmark and only promotes a champion when it beats that guardrail.
+
+### End-to-end verification checklist
+
+1. Load real demand into `core.item_month_demand`.
+2. Run prep → train-select → forecast.
+3. Confirm `analytics.item_classification`, `analytics.item_champion`, and `analytics.forecast_item_month` received rows.
+4. Query `/api/forecast/runs/latest` and ensure `status` is `FORECASTED` with non-zero `items_with_champion` and `items_forecasted`.
+5. Drill into `/api/forecast/forecasts/items/{item_id}` for a high-volume SKU and check that the champion method and p50 forecast align with business expectations.
+
+Following these steps reproduces the observed verification run (`run_id=a9a309aa-2b75-4f29-adbc-f4d57dae7fcc`) that processed 10 real items from Neon, selected TSB champions where obsolescence signals were present, and generated four-month ahead projections.
+
 ### Local backtest queue (dev stub)
 
 When you need the enqueue endpoint to return real queue counts without the production pipeline, apply the dev scaffold and run a smoke test:
