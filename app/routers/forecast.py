@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 from typing import Any
@@ -11,6 +12,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel, Field
 
+from app.config import get_settings
 from app.db import get_db_connection
 from app.security import verify_api_key
 from app.services import (
@@ -19,11 +21,41 @@ from app.services import (
     ForecastingServiceError,
     MissingDependencyError,
 )
+from app.services.pipeline_scheduler import (
+    DEFAULT_PIPELINE_HORIZONS,
+    run_forecast_pipeline,
+)
 
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_HORIZONS = (1, 2, 3, 4)
+DEFAULT_HORIZONS = tuple(DEFAULT_PIPELINE_HORIZONS)
+_AUTO_PIPELINE_LOCK = asyncio.Lock()
+
+
+async def _trigger_pipeline_if_configured(reason: str) -> bool:
+    """Run the forecasting pipeline on demand when enabled."""
+
+    settings = get_settings()
+    if not settings.pipeline_run_on_demand:
+        return False
+
+    async with _AUTO_PIPELINE_LOCK:
+        try:
+            run_id = await run_forecast_pipeline(DEFAULT_HORIZONS)
+            logger.info(
+                "Automatic forecasting pipeline run triggered (%s). New run_id=%s",
+                reason,
+                run_id,
+            )
+            return True
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning(
+                "Automatic forecasting pipeline run skipped (%s): %s",
+                reason,
+                exc,
+            )
+            return False
 
 
 class ForecastPrepResponse(BaseModel):
@@ -161,6 +193,18 @@ async def _resolve_run_id(
         ) from exc
 
     if run_id is None:
+        triggered = await _trigger_pipeline_if_configured("no existing forecast run")
+        if triggered:
+            run_id = await connection.fetchval(
+                """
+                SELECT run_id
+                FROM analytics.forecast_run
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            )
+
+    if run_id is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No forecasting run has been recorded yet.",
@@ -252,25 +296,42 @@ async def read_item_forecast(
     resolved_run_id = await _resolve_run_id(connection, run_id)
     horizon_filter = _normalise_horizons(horizons) if horizons else None
 
-    try:
-        champion_rows = await connection.fetch(
-            """
-            SELECT horizon, champion_method, mape, rmse, beats_baseline, needs_review
-            FROM analytics.item_champion
-            WHERE run_id = $1
-              AND item_id = $2
-              AND ($3::int[] IS NULL OR horizon = ANY($3::int[]))
-            ORDER BY horizon
-            """,
-            resolved_run_id,
-            item_id,
-            horizon_filter,
+    champion_rows = None
+    attempts = 0
+    while attempts < 2:
+        attempts += 1
+        try:
+            champion_rows = await connection.fetch(
+                """
+                SELECT horizon, champion_method, mape, rmse, beats_baseline, needs_review
+                FROM analytics.item_champion
+                WHERE run_id = $1
+                  AND item_id = $2
+                  AND ($3::int[] IS NULL OR horizon = ANY($3::int[]))
+                ORDER BY horizon
+                """,
+                resolved_run_id,
+                item_id,
+                horizon_filter,
+            )
+        except asyncpg.exceptions.UndefinedTableError as exc:  # pragma: no cover - depends on DB
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="analytics.item_champion table is unavailable; apply the forecasting migration stub.",
+            ) from exc
+
+        if champion_rows:
+            break
+
+        if run_id is not None:
+            break
+
+        triggered = await _trigger_pipeline_if_configured(
+            f"no champion for item {item_id}"
         )
-    except asyncpg.exceptions.UndefinedTableError as exc:  # pragma: no cover - depends on DB
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="analytics.item_champion table is unavailable; apply the forecasting migration stub.",
-        ) from exc
+        if not triggered:
+            break
+        resolved_run_id = await _resolve_run_id(connection, None)
 
     if not champion_rows:
         raise HTTPException(
@@ -338,7 +399,8 @@ async def read_default_plan(
 ) -> PlanResponse:
     """Return the first-step plan (p50/p10/p90) for each item at the requested horizon."""
 
-    resolved_run_id = await _resolve_run_id(connection, run_id)
+    provided_run_id = run_id
+    resolved_run_id = await _resolve_run_id(connection, provided_run_id)
 
     try:
         records = await connection.fetch(
@@ -368,6 +430,35 @@ async def read_default_plan(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="analytics.forecast_item_month table is unavailable; apply the forecasting migration stub.",
         ) from exc
+
+    if not records and provided_run_id is None:
+        triggered = await _trigger_pipeline_if_configured(
+            f"no plan rows for horizon {horizon}"
+        )
+        if triggered:
+            resolved_run_id = await _resolve_run_id(connection, provided_run_id)
+            records = await connection.fetch(
+                """
+                WITH ranked AS (
+                    SELECT item_id,
+                           period_start_date,
+                           method,
+                           p50,
+                           p10,
+                           p90,
+                           ROW_NUMBER() OVER (PARTITION BY item_id ORDER BY period_start_date) AS rn
+                    FROM analytics.forecast_item_month
+                    WHERE run_id = $1
+                      AND horizon_months = $2
+                )
+                SELECT item_id, period_start_date, method, p50, p10, p90
+                FROM ranked
+                WHERE rn = 1
+                ORDER BY item_id
+                """,
+                resolved_run_id,
+                horizon,
+            )
 
     items = [
         PlanItem(
@@ -434,5 +525,3 @@ async def read_latest_run(
         updated_at=record["updated_at"],
         forecast_generated_at=record.get("forecast_generated_at"),
     )
-
-

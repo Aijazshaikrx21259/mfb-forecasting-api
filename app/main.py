@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from app.config import get_settings
 from app.db import close_db_pool, init_db_pool
 from app.routers import backtest, data_quality, forecast, health
+from app.services.pipeline_scheduler import ForecastPipelineScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +47,16 @@ def create_application() -> FastAPI:
                 "allow_origins": settings.allowed_origins,
                 "allow_credentials": True,
             }
-        )
+    )
 
     app.add_middleware(CORSMiddleware, **cors_kwargs)
+
+    pipeline_scheduler = ForecastPipelineScheduler(
+        enabled=settings.pipeline_auto_run and bool(settings.database_url),
+        interval_minutes=settings.pipeline_interval_minutes,
+        initial_delay_seconds=settings.pipeline_initial_delay_seconds,
+    )
+    app.state.pipeline_scheduler = pipeline_scheduler
 
     app.include_router(health.router)
     app.include_router(backtest.router)
@@ -64,11 +72,13 @@ def create_application() -> FastAPI:
                 "DATABASE_URL not configured; data-quality endpoints will raise 503 responses."
             )
         await init_db_pool(settings.database_url)
+        await pipeline_scheduler.start()
 
     @app.on_event("shutdown")
     async def shutdown_event() -> None:
         """Release shared resources."""
 
+        await pipeline_scheduler.stop()
         await close_db_pool()
 
     @app.get("/", include_in_schema=False)
