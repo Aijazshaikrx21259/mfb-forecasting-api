@@ -49,6 +49,12 @@ run_stub_migration() {
 
 if check_database_ready; then
   run_stub_migration || true
+  
+  # Generate backtest metrics if forecast data exists
+  if [[ -f "/app/scripts/generate_backtest_metrics.py" ]]; then
+    echo "[entrypoint] Generating backtest metrics for forecast data..."
+    python3 /app/scripts/generate_backtest_metrics.py >/dev/null 2>&1 || echo "[entrypoint] Backtest generation skipped (no forecast data or already exists)."
+  fi
 else
   echo "[entrypoint] Continuing without database initialisation."
 fi
