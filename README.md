@@ -2,6 +2,19 @@
 
 FastAPI service that exposes forecasting capabilities. The project currently provides a basic health endpoint and is structured to scale with additional routers and domain logic.
 
+## 🚀 Deploy to Vercel
+
+This API is ready to deploy to Vercel with **zero code changes**! See [QUICKSTART_VERCEL.md](QUICKSTART_VERCEL.md) for a 5-minute deployment guide.
+
+**Quick deploy:**
+```bash
+npm install -g vercel
+vercel login
+vercel --prod
+```
+
+For detailed instructions, see [VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md).
+
 ## Quick Start (Docker)
 
 The project ships with a `Dockerfile` and `compose.yaml` so you can run it on macOS, Windows, or Linux without installing Python.

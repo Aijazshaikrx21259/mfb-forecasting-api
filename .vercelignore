@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+
+# Docker
+Dockerfile
+docker-entrypoint.sh
+compose.yaml
+
+# Development
+.env
+.env.local
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Documentation
+README.md
+README_migration.md
+
+# Migration (not needed in production)
+migration/data/
+
+# Scripts (may not be needed)
+scripts/
+
+# OS
+.DS_Store
+*.swp
+*.swo
+
