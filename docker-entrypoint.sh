@@ -31,15 +31,27 @@ run_stub_migration() {
     return
   fi
 
-  local stub_path="/app/migration/sql/local_forecast_stub.sql"
-  if [[ ! -f "${stub_path}" ]]; then
-    echo "[entrypoint] Stub migration not found at ${stub_path}; skipping."
-    return
+  local forecast_stub="/app/migration/sql/local_forecast_stub.sql"
+  local backtest_stub="/app/migration/sql/local_backtest_stub.sql"
+  local sample_data="/app/migration/sql/populate_sample_backtest_data.sql"
+
+  if [[ -f "${forecast_stub}" ]]; then
+    echo "[entrypoint] Applying local forecast stub migration..."
+    psql "${DATABASE_URL}" -f "${forecast_stub}" >/dev/null
+    echo "[entrypoint] Forecast stub migration applied."
   fi
 
-  echo "[entrypoint] Applying local forecast stub migration..."
-  psql "${DATABASE_URL}" -f "${stub_path}" >/dev/null
-  echo "[entrypoint] Stub migration applied."
+  if [[ -f "${backtest_stub}" ]]; then
+    echo "[entrypoint] Applying local backtest stub migration..."
+    psql "${DATABASE_URL}" -f "${backtest_stub}" >/dev/null
+    echo "[entrypoint] Backtest stub migration applied."
+  fi
+
+  if [[ -f "${sample_data}" ]]; then
+    echo "[entrypoint] Populating sample backtest data..."
+    psql "${DATABASE_URL}" -f "${sample_data}" >/dev/null 2>&1 || echo "[entrypoint] Sample data already exists or failed to insert."
+    echo "[entrypoint] Sample data population complete."
+  fi
 }
 
 if check_database_ready; then
