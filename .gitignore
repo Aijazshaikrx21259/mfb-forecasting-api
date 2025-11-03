@@ -169,3 +169,6 @@ service-account.json
 # Data files
 
 migration/data/
+
+# Vercel
+.vercel
