@@ -13,8 +13,6 @@ This API is ready to deploy to Render's free tier! The service includes data sci
 4. Connect your repository (Render auto-detects `render.yaml`)
 5. Set your environment variables and deploy
 
-For detailed instructions, see [RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md).
-
 ## Quick Start (Docker)
 
 The project ships with a `Dockerfile` and `compose.yaml` so you can run it on macOS, Windows, or Linux without installing Python.
