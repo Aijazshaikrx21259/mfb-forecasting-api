@@ -33,7 +33,6 @@ run_stub_migration() {
 
   local forecast_stub="/app/migration/sql/local_forecast_stub.sql"
   local backtest_stub="/app/migration/sql/local_backtest_stub.sql"
-  local sample_data="/app/migration/sql/populate_sample_backtest_data.sql"
 
   if [[ -f "${forecast_stub}" ]]; then
     echo "[entrypoint] Applying local forecast stub migration..."
@@ -45,12 +44,6 @@ run_stub_migration() {
     echo "[entrypoint] Applying local backtest stub migration..."
     psql "${DATABASE_URL}" -f "${backtest_stub}" >/dev/null
     echo "[entrypoint] Backtest stub migration applied."
-  fi
-
-  if [[ -f "${sample_data}" ]]; then
-    echo "[entrypoint] Populating sample backtest data..."
-    psql "${DATABASE_URL}" -f "${sample_data}" >/dev/null 2>&1 || echo "[entrypoint] Sample data already exists or failed to insert."
-    echo "[entrypoint] Sample data population complete."
   fi
 }
 
