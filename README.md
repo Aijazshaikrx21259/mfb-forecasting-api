@@ -2,18 +2,18 @@
 
 FastAPI service that exposes forecasting capabilities. The project currently provides a basic health endpoint and is structured to scale with additional routers and domain logic.
 
-## 🚀 Deploy to Vercel
+## 🚀 Deploy to Render (Free Tier)
 
-This API is ready to deploy to Vercel with **zero code changes**! See [QUICKSTART_VERCEL.md](QUICKSTART_VERCEL.md) for a 5-minute deployment guide.
+This API is ready to deploy to Render's free tier! The service includes data science libraries (pandas, numpy, statsforecast) that exceed Vercel's 250 MB limit, making Render the ideal platform.
 
 **Quick deploy:**
-```bash
-npm install -g vercel
-vercel login
-vercel --prod
-```
+1. Push your code to GitHub
+2. Go to [Render Dashboard](https://dashboard.render.com/)
+3. Create New → Blueprint
+4. Connect your repository (Render auto-detects `render.yaml`)
+5. Set your environment variables and deploy
 
-For detailed instructions, see [VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md).
+For detailed instructions, see [RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md).
 
 ## Quick Start (Docker)
 
@@ -31,7 +31,7 @@ To stop the containers press `Ctrl+C` and optionally remove them with `docker co
 
 ### Configure security
 
-Endpoints and API documentation require an `X-API-Key` header when an API key is configured. Copy the sample environment file and adjust values to match your trusted clients (for example, your Vercel frontend and localhost):
+Endpoints and API documentation require an `X-API-Key` header when an API key is configured. Copy the sample environment file and adjust values to match your trusted clients (for example, your frontend and localhost):
 
 ```bash
 cp env.example .env
@@ -42,7 +42,7 @@ Then export those variables before launching or let Docker Compose read them aut
 
 ```bash
 API_KEY=super-secret \
-ALLOWED_ORIGINS="https://my-frontend.vercel.app" \
+ALLOWED_ORIGINS="https://my-frontend.com" \
 ENVIRONMENT=production \
 DATABASE_URL=postgresql://user:password@host/database \
 docker compose up --build
