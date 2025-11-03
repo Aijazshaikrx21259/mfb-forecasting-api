@@ -42,7 +42,7 @@ WITH bounds AS (
         ) AS start_month,
         (
             COALESCE(max_month, date_trunc('month', now())::date)
-            + INTERVAL '18 months'
+            + INTERVAL '4 months'
         )::date AS end_month
     FROM bounds
 ), series AS (

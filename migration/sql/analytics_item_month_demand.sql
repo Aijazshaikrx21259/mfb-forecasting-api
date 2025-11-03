@@ -42,7 +42,7 @@ WITH params AS (
         COALESCE(MIN(month_start), date_trunc('month', now())::date) AS min_month,
         GREATEST(
             COALESCE(MAX(month_start), date_trunc('month', now())::date),
-            (date_trunc('month', now()) + INTERVAL '12 months')::date
+            (date_trunc('month', now()) + INTERVAL '4 months')::date
         ) AS max_month
     FROM src
 ), calendar AS (
