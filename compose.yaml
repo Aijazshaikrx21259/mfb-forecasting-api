@@ -6,6 +6,9 @@ services:
     restart: unless-stopped
     environment:
       - ENVIRONMENT=${ENVIRONMENT:-local}
-      - API_KEY=${API_KEY:-}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+      - API_KEY=${API_KEY:-change-me}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
       - DATABASE_URL=${DATABASE_URL:-}
+      - PIPELINE_AUTO_RUN=${PIPELINE_AUTO_RUN:-true}
+      - PIPELINE_INITIAL_DELAY_SECONDS=${PIPELINE_INITIAL_DELAY_SECONDS:-10}
+      - PIPELINE_INTERVAL_MINUTES=${PIPELINE_INTERVAL_MINUTES:-1440}

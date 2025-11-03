@@ -81,7 +81,9 @@ class BacktestItemSummaryPage(BaseModel):
     total_count: int
     page: int
     page_size: int
-    run_id: UUID
+    run_id: UUID | None = Field(
+        default=None, description="Backtest run identifier supplying these metrics."
+    )
 
 
 class BacktestWindowError(BaseModel):
@@ -134,8 +136,11 @@ def _normalise_horizons(values: list[int] | None) -> list[int]:
 
 
 async def _resolve_latest_run_id(
-    connection: asyncpg.Connection, table_name: str, provided: UUID | None
-) -> UUID:
+    connection: asyncpg.Connection,
+    table_name: str,
+    provided: UUID | None,
+    allow_missing: bool = False,
+) -> UUID | None:
     if provided is not None:
         return provided
 
@@ -154,6 +159,8 @@ async def _resolve_latest_run_id(
         ) from exc
 
     if run_id is None:
+        if allow_missing:
+            return None
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No backtest run has been recorded yet.",
@@ -272,7 +279,15 @@ async def read_backtest_summary(
 ) -> list[BacktestOverallSummary]:
     """Return overall backtest metrics for the requested run."""
 
-    resolved_run_id = await _resolve_latest_run_id(connection, "analytics.backtest_overall_summary", run_id)
+    resolved_run_id = await _resolve_latest_run_id(
+        connection,
+        "analytics.backtest_overall_summary",
+        run_id,
+        allow_missing=True,
+    )
+
+    if resolved_run_id is None:
+        return []
 
     try:
         records = await connection.fetch(
@@ -291,10 +306,7 @@ async def read_backtest_summary(
         ) from exc
 
     if not records:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No summary metrics found for the requested run.",
-        )
+        return []
 
     horizon_filter = set(_normalise_horizons(horizons) if horizons else [])
 
@@ -358,7 +370,21 @@ async def list_backtest_items(
 ) -> BacktestItemSummaryPage:
     """Paginate backtest metrics per item and model."""
 
-    resolved_run_id = await _resolve_latest_run_id(connection, "analytics.backtest_item_summary", run_id)
+    resolved_run_id = await _resolve_latest_run_id(
+        connection,
+        "analytics.backtest_item_summary",
+        run_id,
+        allow_missing=True,
+    )
+
+    if resolved_run_id is None:
+        return BacktestItemSummaryPage(
+            items=[],
+            total_count=0,
+            page=page,
+            page_size=page_size,
+            run_id=None,
+        )
 
     order_fields = {
         "mape": "mape",
@@ -567,5 +593,3 @@ async def describe_benchmark_method() -> BacktestBenchmarkResponse:
             "Used as a benchmark to evaluate ETS, Croston-SBA, and TSB models."
         ),
     )
-
-

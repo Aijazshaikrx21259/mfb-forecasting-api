@@ -213,6 +213,12 @@ Confirm coverage before proceeding:
 psql "$DATABASE_URL" -c "SELECT COUNT(*), MIN(period_start_date), MAX(period_start_date) FROM core.item_month_demand";
 ```
 
+### Automatic pipeline triggers
+
+- Set `PIPELINE_AUTO_RUN=true` (plus the optional interval and delay variables) to have the API run the full pipeline on a schedule after startup.
+- Leave `PIPELINE_RUN_ON_DEMAND=true` (the default) when you want the service to kick off the pipeline automatically the first time a plan/forecast endpoint is hit and no runs exist yet. The request will block until the run completes so the UI immediately sees fresh results.
+- Disable on-demand runs (`PIPELINE_RUN_ON_DEMAND=false`) if an external orchestrator handles all pipeline execution and you prefer the API to return 404s when no runs are found.
+
 ### Endpoints overview
 
 | Method | Path                                            | Purpose                                                                                                                                                                                         |
@@ -313,7 +319,17 @@ The TSB model now receives a conformal interval helper under the hood so that th
    }
    ```
 
-   Use the p10/p90 spread to draw planning bands in the UI; clamp or relabel negative values where business rules require non-negative quantities.
+  Use the p10/p90 spread to draw planning bands in the UI; clamp or relabel negative values where business rules require non-negative quantities.
+
+### Stubbed backtest helper (local only)
+
+When you rely on the development scaffold (`migration/sql/local_backtest_stub.sql`), the `/api/backtest/run` endpoint enqueues jobs but does not compute accuracy metrics automatically. A helper script is available to populate placeholder values so the UI can display MAPE and benchmark columns during local development:
+
+```bash
+docker compose exec web python -m scripts.process_backtest_stub --run-id <run_id>
+```
+
+Omit `--run-id` to process the latest pending run. The script writes deterministic sample metrics and marks the queue entries complete. Replace it with your production backtest pipeline in shared or production environments.
 
 ### Database artifacts written by US-5
 

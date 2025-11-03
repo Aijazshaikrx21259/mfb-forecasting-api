@@ -66,8 +66,15 @@ async def get_db_connection() -> AsyncIterator[asyncpg.Connection]:
         yield connection
 
 
+async def get_db_pool() -> asyncpg.Pool:
+    """Return the shared asyncpg connection pool."""
+
+    return await _get_pool()
+
+
 __all__ = [
     "init_db_pool",
     "close_db_pool",
     "get_db_connection",
+    "get_db_pool",
 ]
