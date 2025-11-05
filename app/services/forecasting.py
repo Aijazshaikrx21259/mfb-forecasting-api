@@ -90,14 +90,20 @@ class EvaluationBundle:
 def _ensure_statsforecast() -> tuple[Any, ...]:
     try:
         from statsforecast import StatsForecast
-        from statsforecast.models import ETS, CrostonSBA, SeasonalNaive, TSB
+        from statsforecast.models import (
+            AutoARIMA,
+            AutoETS,
+            CrostonSBA,
+            SeasonalNaive,
+            TSB,
+        )
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise MissingDependencyError(
             "statsforecast is required for champion selection. Install dependencies with "
             "`pip install -r requirements.txt`."
         ) from exc
 
-    return StatsForecast, ETS, CrostonSBA, SeasonalNaive, TSB
+    return StatsForecast, AutoETS, AutoARIMA, CrostonSBA, SeasonalNaive, TSB
 
 
 def _nan_to_none(value: float | None) -> float | None:
@@ -253,14 +259,14 @@ def _candidate_methods(demand_class: str, obsolescence_flag: bool) -> list[str]:
     if obsolescence_flag:
         return ["CrostonSBA", "TSB"]
     if demand_class in {"INTERMITTENT", "LUMPY"}:
-        return ["CrostonSBA", "ETS"]
-    return ["ETS"]
+        return ["CrostonSBA", "TSB"]
+    return ["AutoETS", "AutoARIMA"]
 
 
 def _simpler_preference(demand_class: str) -> list[str]:
     if demand_class in {"INTERMITTENT", "LUMPY"}:
-        return ["CrostonSBA", "ETS", "TSB"]
-    return ["ETS", "CrostonSBA", "TSB"]
+        return ["CrostonSBA", "TSB", "AutoETS", "AutoARIMA"]
+    return ["AutoETS", "AutoARIMA", "CrostonSBA", "TSB"]
 
 
 def _compute_metrics(cv_frame: pd.DataFrame, horizons: Sequence[int]) -> dict[str, dict[int, MethodMetricRow]]:
@@ -418,7 +424,7 @@ def _evaluate_items(
     step_size: int,
     n_windows: int | None,
 ) -> EvaluationBundle:
-    StatsForecast, ETS, CrostonSBA, SeasonalNaive, TSB = _ensure_statsforecast()
+    StatsForecast, AutoETS, AutoARIMA, CrostonSBA, SeasonalNaive, TSB = _ensure_statsforecast()
 
     metrics: list[MethodMetricRow] = []
     champions: list[ChampionRow] = []
@@ -443,8 +449,10 @@ def _evaluate_items(
 
         model_instances: list[Any] = []
         for name in candidate_names:
-            if name == "ETS":
-                model_instances.append(ETS(season_length=SEASON_LENGTH))
+            if name == "AutoETS":
+                model_instances.append(AutoETS(season_length=SEASON_LENGTH))
+            elif name == "AutoARIMA":
+                model_instances.append(AutoARIMA(season_length=SEASON_LENGTH))
             elif name == "CrostonSBA":
                 model_instances.append(CrostonSBA())
             elif name == "TSB":
@@ -858,7 +866,7 @@ class ForecastingService:
         champions: Sequence[ChampionRow],
         horizons: Sequence[int],
     ) -> list[tuple[str, date, int, str, float | None, float | None, float | None]]:
-        StatsForecast, ETS, CrostonSBA, SeasonalNaive, TSB = _ensure_statsforecast()
+        StatsForecast, AutoETS, AutoARIMA, CrostonSBA, SeasonalNaive, TSB = _ensure_statsforecast()
 
         grouped_series = {
             item_id: group.sort_values("period_start_date")
@@ -888,8 +896,10 @@ class ForecastingService:
             for method, method_horizons in by_method.items():
                 max_h = max(method_horizons)
 
-                if method == "ETS":
-                    model = ETS(season_length=SEASON_LENGTH)
+                if method == "AutoETS":
+                    model = AutoETS(season_length=SEASON_LENGTH)
+                elif method == "AutoARIMA":
+                    model = AutoARIMA(season_length=SEASON_LENGTH)
                 elif method == "CrostonSBA":
                     model = CrostonSBA()
                 elif method == "TSB":
@@ -1022,5 +1032,3 @@ class ForecastingService:
 
 
 __all__ = ["ForecastingService", "ForecastingServiceError", "MissingDependencyError", "DataUnavailableError"]
-
-
