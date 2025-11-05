@@ -8,15 +8,23 @@ services:
     plan: free
     envVars:
       - key: ENVIRONMENT
-        value: production
-      - key: PIPELINE_AUTO_RUN
-        value: "false"
-      - key: DATABASE_URL
         sync: false
       - key: API_KEY
-        generateValue: true
+        sync: false
       - key: ALLOWED_ORIGINS
-        value: "*"
+        sync: false
+      - key: NEON_DATABASE_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: PIPELINE_AUTO_RUN
+        value: "false"
+      - key: PIPELINE_INITIAL_DELAY_SECONDS
+        value: "60"
+      - key: PIPELINE_INTERVAL_MINUTES
+        value: "1440"
+      - key: PIPELINE_RUN_ON_DEMAND
+        value: "true"
       - key: PORT
         value: 8000
     healthCheckPath: /health
