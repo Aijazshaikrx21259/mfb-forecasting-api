@@ -88,6 +88,7 @@ class ChampionSummary(BaseModel):
     method: str
     mape: float | None = None
     rmse: float | None = None
+    mdape: float | None = None
     beats_baseline: bool
     needs_review: bool
 
@@ -303,7 +304,7 @@ async def read_item_forecast(
         try:
             champion_rows = await connection.fetch(
                 """
-                SELECT horizon, champion_method, mape, rmse, beats_baseline, needs_review
+                SELECT horizon, champion_method, mape, rmse, mdape, beats_baseline, needs_review
                 FROM analytics.item_champion
                 WHERE run_id = $1
                   AND item_id = $2
@@ -365,6 +366,7 @@ async def read_item_forecast(
             method=row["champion_method"],
             mape=_decimal_to_float(row.get("mape")),
             rmse=_decimal_to_float(row.get("rmse")),
+            mdape=_decimal_to_float(row.get("mdape")),
             beats_baseline=bool(row.get("beats_baseline")),
             needs_review=bool(row.get("needs_review")),
         )

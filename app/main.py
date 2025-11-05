@@ -55,6 +55,8 @@ def create_application() -> FastAPI:
         enabled=settings.pipeline_auto_run and bool(settings.database_url),
         interval_minutes=settings.pipeline_interval_minutes,
         initial_delay_seconds=settings.pipeline_initial_delay_seconds,
+        stable_interval_minutes=settings.pipeline_stable_interval_minutes,
+        volatile_interval_minutes=settings.pipeline_volatile_interval_minutes,
     )
     app.state.pipeline_scheduler = pipeline_scheduler
 

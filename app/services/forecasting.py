@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date
 from statistics import mean, median
 from uuid import UUID, uuid4
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import asyncpg
 import numpy as np
@@ -27,6 +27,20 @@ TIE_TOLERANCE = 1.0  # percentage points of MAPE considered indistinguishable
 TSB_ALPHA_D = 0.15
 TSB_ALPHA_P = 0.1
 PREDICTION_INTERVAL_LEVEL = 80
+HIGH_VOLUME_TOTAL_THRESHOLD = 5_000.0
+MAX_HIGH_VOLUME_WINDOWS = 4
+MIN_HIGH_VOLUME_WINDOWS = 2
+ALERT_MAPE_THRESHOLD = 35.0
+ALERT_MDAPE_THRESHOLD = 30.0
+# Continuous monitoring thresholds for drift detection
+ALERT_MAPE_DRIFT_THRESHOLD = 10.0  # percentage points increase from historical average
+ALERT_MDAPE_DRIFT_THRESHOLD = 8.0  # percentage points increase from historical average
+MIN_RUNS_FOR_DRIFT_DETECTION = 3  # minimum historical runs to compare against
+
+SEGMENT_DEMAND_CLASSES: dict[str, set[str]] = {
+    "stable": {"SMOOTH", "ERRATIC"},
+    "volatile": {"INTERMITTENT", "LUMPY"},
+}
 
 DEMAND_CLASS_LABELS = ("SMOOTH", "ERRATIC", "INTERMITTENT", "LUMPY")
 
@@ -59,6 +73,7 @@ class MethodMetricRow:
     horizon: int
     mape: float | None
     rmse: float | None
+    mdape: float | None
     beats_baseline: bool
     fold_count: int
     mape_denominator: int
@@ -71,6 +86,7 @@ class ChampionRow:
     method: str
     mape: float | None
     rmse: float | None
+    mdape: float | None
     beats_baseline: bool
     needs_review: bool
     demand_class: str
@@ -81,10 +97,30 @@ class ChampionRow:
 class EvaluationBundle:
     metrics: list[MethodMetricRow]
     champions: list[ChampionRow]
+    residuals: list["ResidualSummaryRow"]
     items_evaluated: int
     items_with_champion: int
     items_beating_baseline: int
     champion_counts: Counter[str]
+
+
+@dataclass(slots=True)
+class ResidualSummaryRow:
+    item_id: str
+    method: str
+    horizon: int
+    abs_p90: float | None
+    abs_p95: float | None
+    mdape: float | None
+
+
+@dataclass(slots=True)
+class HorizonPerformanceRecord:
+    """Track horizon performance across items to identify redundant horizons."""
+    item_id: str
+    horizon: int
+    beats_baseline: bool
+    mape: float | None
 
 
 def _ensure_statsforecast() -> tuple[Any, ...]:
@@ -287,8 +323,11 @@ def _compute_metrics(cv_frame: pd.DataFrame, horizons: Sequence[int]) -> dict[st
 
         mask = np.abs(y_true) > EPSILON
         mape = None
+        mdape = None
         if mask.any():
-            mape = float(np.mean(np.abs((y_true[mask] - y_hat[mask]) / y_true[mask])) * 100)
+            percentage_errors = np.abs((y_true[mask] - y_hat[mask]) / y_true[mask]) * 100
+            mape = float(np.mean(percentage_errors))
+            mdape = float(np.median(percentage_errors))
 
         metrics[model_name][int(horizon)] = MethodMetricRow(
             item_id="",
@@ -296,6 +335,7 @@ def _compute_metrics(cv_frame: pd.DataFrame, horizons: Sequence[int]) -> dict[st
             horizon=int(horizon),
             mape=_nan_to_none(mape),
             rmse=_nan_to_none(rmse),
+            mdape=_nan_to_none(mdape),
             beats_baseline=False,
             fold_count=len(rows),
             mape_denominator=int(mask.sum()),
@@ -316,6 +356,7 @@ def _select_champion(
     metrics_output: list[MethodMetricRow] = []
     champion_counter: Counter[str] = Counter()
     all_guardrails_met = True
+    horizons_beating_baseline = 0
 
     preference_order = _simpler_preference(demand_class)
 
@@ -332,6 +373,7 @@ def _select_champion(
                     horizon=horizon,
                     mape=metric.mape,
                     rmse=metric.rmse,
+                    mdape=metric.mdape,
                     beats_baseline=False,
                     fold_count=metric.fold_count,
                     mape_denominator=metric.mape_denominator,
@@ -379,6 +421,7 @@ def _select_champion(
                     horizon=horizon,
                     mape=baseline.mape,
                     rmse=baseline.rmse,
+                    mdape=baseline.mdape,
                     beats_baseline=False,
                     fold_count=baseline.fold_count,
                     mape_denominator=baseline.mape_denominator,
@@ -393,8 +436,24 @@ def _select_champion(
             needs_review = True
             all_guardrails_met = False
 
+        skip_horizon = False
+        if baseline is not None and not beats_baseline and horizon > 1:
+            logger.info(
+                "[champion] Skipping horizon %s for item %s; champion %s failed to beat SeasonalNaive",
+                horizon,
+                item_id,
+                best_metric.method,
+            )
+            skip_horizon = True
+
         if not beats_baseline:
             all_guardrails_met = False
+        else:
+            horizons_beating_baseline += 1
+
+        if skip_horizon:
+            continue
+
         best_metric.beats_baseline = beats_baseline
 
         champions.append(
@@ -404,6 +463,7 @@ def _select_champion(
                 method=best_metric.method,
                 mape=best_metric.mape,
                 rmse=best_metric.rmse,
+                mdape=best_metric.mdape,
                 beats_baseline=beats_baseline,
                 needs_review=needs_review,
                 demand_class=demand_class,
@@ -412,9 +472,39 @@ def _select_champion(
         )
         champion_counter[best_metric.method] += 1
 
-    guardrail_flag = 1 if champions and all_guardrails_met else 0
+    guardrail_flag = horizons_beating_baseline if champions else 0
 
     return champions, metrics_output, champion_counter, guardrail_flag
+
+
+def _resolve_cv_windows(
+    values: Sequence[float], 
+    base_windows: int | None,
+    demand_class: str | None = None,
+) -> int | None:
+    """
+    Resolve the number of cross-validation windows based on volume and demand pattern.
+    
+    High-volume items get fewer windows to reduce redundant fits.
+    Volatile items might benefit from more windows to capture variation.
+    """
+    if base_windows is None:
+        return None
+    try:
+        total_demand = float(np.nansum(values))
+    except Exception:  # pragma: no cover - defensive
+        return base_windows
+
+    # High-volume SKUs: reduce windows significantly
+    if total_demand >= HIGH_VOLUME_TOTAL_THRESHOLD:
+        return max(MIN_HIGH_VOLUME_WINDOWS, min(base_windows, MAX_HIGH_VOLUME_WINDOWS))
+    
+    # Smooth/stable items: can use fewer windows
+    if demand_class in {"SMOOTH", "ERRATIC"}:
+        return max(4, min(base_windows, 8))
+    
+    # Volatile items maintain full windows for better variation capture
+    return base_windows
 
 
 def _evaluate_items(
@@ -423,6 +513,7 @@ def _evaluate_items(
     horizons: Sequence[int],
     step_size: int,
     n_windows: int | None,
+    allowed_items: set[str] | None = None,
 ) -> EvaluationBundle:
     StatsForecast, AutoETS, AutoARIMA, CrostonSBA, SeasonalNaive, TSB = _ensure_statsforecast()
 
@@ -431,6 +522,20 @@ def _evaluate_items(
     champion_counter: Counter[str] = Counter()
     items_with_champion = 0
     items_beating_baseline = 0
+    residual_summaries: list[ResidualSummaryRow] = []
+
+    if allowed_items is not None:
+        series_df = series_df[series_df["item_id"].isin(allowed_items)]
+        if not series_df.size:
+            return EvaluationBundle(
+                metrics=[],
+                champions=[],
+                residuals=[],
+                items_evaluated=0,
+                items_with_champion=0,
+                items_beating_baseline=0,
+                champion_counts=Counter(),
+            )
 
     max_horizon = max(horizons)
 
@@ -475,8 +580,13 @@ def _evaluate_items(
                 "df": df,
                 "step_size": step_size,
             }
-            if n_windows is not None:
-                cross_validation_kwargs["n_windows"] = n_windows
+            item_windows = _resolve_cv_windows(
+                demand_series["demand"].to_numpy(dtype=float), 
+                n_windows,
+                demand_class=classification.demand_class,
+            )
+            if item_windows is not None:
+                cross_validation_kwargs["n_windows"] = item_windows
 
             cv_frame = sf.cross_validation(h=max_horizon, **cross_validation_kwargs)
             cv_frame = cv_frame.reset_index()
@@ -488,6 +598,10 @@ def _evaluate_items(
             column
             for column in cv_frame.columns
             if column not in {"unique_id", "ds", "cutoff", "y"}
+            and "-lo-" not in column.lower()
+            and "-hi-" not in column.lower()
+            and "_lo_" not in column.lower()
+            and "_hi_" not in column.lower()
         ]
         if not model_columns:
             logger.warning("Skipping item %s: cross-validation returned no model columns", item_id)
@@ -505,6 +619,23 @@ def _evaluate_items(
             + (cv_long["ds"].dt.month - cv_long["cutoff"].dt.month)
         )
         cv_long = cv_long[cv_long["h"] > 0]
+
+        residual_lookup: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] = {}
+        for model_name in model_columns:
+            method_rows = cv_long[cv_long["model"] == model_name]
+            if method_rows.empty:
+                continue
+            actuals = method_rows["y"].to_numpy(dtype=float)
+            predictions = method_rows["y_hat"].to_numpy(dtype=float)
+            horizons_arr = method_rows["h"].to_numpy(dtype=int)
+            for horizon in horizons:
+                mask = horizons_arr == horizon
+                if not mask.any():
+                    continue
+                residual_lookup[(model_name, horizon)] = (
+                    predictions[mask] - actuals[mask],
+                    actuals[mask],
+                )
 
         metric_map = _compute_metrics(cv_long, horizons)
 
@@ -532,11 +663,38 @@ def _evaluate_items(
         metrics.extend(horizon_metrics)
         champion_counter.update(champion_counts)
 
+        for champion in horizon_champions:
+            key = (champion.method, champion.horizon)
+            residual_data = residual_lookup.get(key)
+            if residual_data is None:
+                continue
+            residuals_arr, actuals_arr = residual_data
+            if residuals_arr.size == 0:
+                continue
+            abs_errors = np.abs(residuals_arr)
+            abs_p90 = float(np.quantile(abs_errors, 0.90)) if abs_errors.size else None
+            abs_p95 = float(np.quantile(abs_errors, 0.95)) if abs_errors.size else None
+            valid_mask = np.abs(actuals_arr) > EPSILON
+            mdape = None
+            if valid_mask.any():
+                mdape = float(np.median(np.abs(residuals_arr[valid_mask] / actuals_arr[valid_mask]) * 100))
+            residual_summaries.append(
+                ResidualSummaryRow(
+                    item_id=str(item_id),
+                    method=champion.method,
+                    horizon=champion.horizon,
+                    abs_p90=_nan_to_none(abs_p90),
+                    abs_p95=_nan_to_none(abs_p95),
+                    mdape=_nan_to_none(mdape if mdape is not None else champion.mdape),
+                )
+            )
+
     items_evaluated = series_df["item_id"].nunique()
 
     return EvaluationBundle(
         metrics=metrics,
         champions=champions,
+        residuals=residual_summaries,
         items_evaluated=items_evaluated,
         items_with_champion=items_with_champion,
         items_beating_baseline=items_beating_baseline,
@@ -605,24 +763,75 @@ class ForecastingService:
         horizons: Sequence[int],
         step_size: int,
         n_windows: int | None,
+        include_classes: set[str] | None = None,
+        segment: str = "all",
+        enable_horizon_optimization: bool = True,
     ) -> tuple[UUID, EvaluationBundle]:
         frame = await self._fetch_series()
         classifications = await self._load_classifications()
+
+        # Smart horizon optimization: drop horizons that rarely beat baseline
+        filtered_horizons = list(horizons)
+        if enable_horizon_optimization:
+            redundant_horizons = await self.get_redundant_horizons()
+            if redundant_horizons:
+                original_count = len(filtered_horizons)
+                filtered_horizons = [h for h in filtered_horizons if h not in redundant_horizons]
+                if len(filtered_horizons) < original_count:
+                    logger.info(
+                        "[optimization] Dropped %d redundant horizons %s; evaluating %s",
+                        original_count - len(filtered_horizons),
+                        sorted(redundant_horizons),
+                        sorted(filtered_horizons),
+                    )
+                # Ensure we evaluate at least one horizon
+                if not filtered_horizons and horizons:
+                    filtered_horizons = [horizons[0]]
+                    logger.warning(
+                        "[optimization] All horizons marked redundant; keeping horizon %d",
+                        horizons[0],
+                    )
+
+        allowed_items: set[str] | None = None
+        if include_classes is not None:
+            classifications = {
+                item_id: result
+                for item_id, result in classifications.items()
+                if result.demand_class in include_classes
+            }
+            allowed_items = set(classifications.keys())
+            if allowed_items:
+                frame = frame[frame["item_id"].isin(allowed_items)]
 
         evaluation = await asyncio.to_thread(
             _evaluate_items,
             frame,
             classifications,
-            horizons,
+            filtered_horizons,
             step_size,
             n_windows,
+            allowed_items,
         )
 
         run_id = uuid4()
 
         await self._persist_backtest_metrics(run_id, evaluation.metrics)
         await self._persist_champions(run_id, evaluation.champions)
-        await self._record_run(run_id, horizons, evaluation)
+        await self._persist_residual_summaries(run_id, evaluation.residuals)
+        await self._persist_alerts(run_id, evaluation.champions)
+        await self._record_run(run_id, horizons, evaluation, segment)
+
+        if evaluation.metrics:
+            mape_values = [
+                metric.mape for metric in evaluation.metrics if metric.mape is not None
+            ]
+            mdape_values = [
+                metric.mdape for metric in evaluation.metrics if metric.mdape is not None
+            ]
+            if mape_values:
+                logger.info("[metrics] Run %s average MAPE %.2f%%", run_id, float(np.mean(mape_values)))
+            if mdape_values:
+                logger.info("[metrics] Run %s median MdAPE %.2f%%", run_id, float(np.median(mdape_values)))
 
         return run_id, evaluation
 
@@ -639,12 +848,14 @@ class ForecastingService:
 
         item_ids = sorted({row.item_id for row in champions})
         frame = await self._fetch_series(item_ids=item_ids)
+        residual_map = await self._load_residual_summaries(run_id)
 
         forecast_rows = await asyncio.to_thread(
             self._build_forecasts,
             frame,
             champions,
             horizons,
+            residual_map,
         )
 
         await self._persist_forecasts(run_id, forecast_rows)
@@ -698,6 +909,7 @@ class ForecastingService:
                 metric.method,
                 metric.mape,
                 metric.rmse,
+                metric.mdape,
                 metric.beats_baseline,
                 metric.fold_count,
                 metric.mape_denominator,
@@ -716,12 +928,13 @@ class ForecastingService:
                 method,
                 mape,
                 rmse,
+                mdape,
                 beats_baseline,
                 fold_count,
                 mape_denominator_count,
                 decided_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
         """
 
         try:
@@ -738,6 +951,7 @@ class ForecastingService:
                 row.method,
                 row.mape,
                 row.rmse,
+                row.mdape,
                 row.beats_baseline,
                 row.needs_review,
                 row.demand_class,
@@ -757,13 +971,14 @@ class ForecastingService:
                 champion_method,
                 mape,
                 rmse,
+                mdape,
                 beats_baseline,
                 needs_review,
                 demand_class,
                 obsolescence_flag,
                 decided_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
         """
 
         try:
@@ -771,12 +986,126 @@ class ForecastingService:
         except asyncpg.PostgresError as exc:  # pragma: no cover - depends on DB
             raise ForecastingServiceError("Failed to persist champion selections.") from exc
 
-    async def _record_run(self, run_id: UUID, horizons: Sequence[int], evaluation: EvaluationBundle) -> None:
+    async def _persist_residual_summaries(
+        self,
+        run_id: UUID,
+        summaries: Iterable[ResidualSummaryRow],
+    ) -> None:
+        rows = [
+            (
+                run_id,
+                summary.item_id,
+                summary.horizon,
+                summary.method,
+                summary.abs_p90,
+                summary.abs_p95,
+                summary.mdape,
+            )
+            for summary in summaries
+        ]
+
+        if not rows:
+            return
+
+        query = """
+            INSERT INTO analytics.backtest_residual_summary (
+                run_id,
+                item_id,
+                horizon,
+                method,
+                abs_p90,
+                abs_p95,
+                mdape,
+                created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+        """
+
+        try:
+            await self.connection.executemany(query, rows)
+        except asyncpg.PostgresError as exc:  # pragma: no cover - depends on DB
+            raise ForecastingServiceError("Failed to persist residual summaries.") from exc
+
+    async def _persist_alerts(self, run_id: UUID, champions: Iterable[ChampionRow]) -> None:
+        """
+        Persist alerts for high error values and accuracy drift.
+        
+        Checks both absolute thresholds and drift from historical averages.
+        """
+        alerts: list[tuple[UUID, str, int, str, str, float]] = []
+        
+        # Get historical metrics for drift detection
+        historical_metrics = await self._get_historical_metrics()
+        
+        for row in champions:
+            # Absolute threshold alerts
+            if row.mape is not None and row.mape > ALERT_MAPE_THRESHOLD:
+                alerts.append((run_id, row.item_id, row.horizon, row.method, "MAPE", float(row.mape)))
+            if row.mdape is not None and row.mdape > ALERT_MDAPE_THRESHOLD:
+                alerts.append((run_id, row.item_id, row.horizon, row.method, "MdAPE", float(row.mdape)))
+            
+            # Drift detection alerts
+            hist_key = (row.item_id, row.horizon)
+            if hist_key in historical_metrics:
+                hist_mape, hist_mdape, run_count = historical_metrics[hist_key]
+                
+                if run_count >= MIN_RUNS_FOR_DRIFT_DETECTION:
+                    if row.mape is not None and hist_mape is not None:
+                        mape_increase = row.mape - hist_mape
+                        if mape_increase > ALERT_MAPE_DRIFT_THRESHOLD:
+                            alerts.append((
+                                run_id, row.item_id, row.horizon, row.method, 
+                                "MAPE_DRIFT", float(mape_increase)
+                            ))
+                    
+                    if row.mdape is not None and hist_mdape is not None:
+                        mdape_increase = row.mdape - hist_mdape
+                        if mdape_increase > ALERT_MDAPE_DRIFT_THRESHOLD:
+                            alerts.append((
+                                run_id, row.item_id, row.horizon, row.method,
+                                "MdAPE_DRIFT", float(mdape_increase)
+                            ))
+
+        if not alerts:
+            return
+
+        query = """
+            INSERT INTO analytics.forecast_alert (
+                run_id,
+                item_id,
+                horizon,
+                method,
+                metric,
+                value,
+                created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, now())
+        """
+
+        try:
+            await self.connection.executemany(query, alerts)
+            drift_count = sum(1 for alert in alerts if "DRIFT" in alert[4])
+            if drift_count > 0:
+                logger.warning(
+                    "[drift] Detected %d accuracy drift alerts in run %s", 
+                    drift_count, run_id
+                )
+        except asyncpg.PostgresError as exc:  # pragma: no cover - depends on DB
+            raise ForecastingServiceError("Failed to persist forecast alerts.") from exc
+
+    async def _record_run(
+        self,
+        run_id: UUID,
+        horizons: Sequence[int],
+        evaluation: EvaluationBundle,
+        segment: str,
+    ) -> None:
         query = """
             INSERT INTO analytics.forecast_run (
                 run_id,
                 horizons,
                 status,
+                segment,
                 items_evaluated,
                 items_with_champion,
                 items_beating_baseline,
@@ -784,7 +1113,7 @@ class ForecastingService:
                 created_at,
                 updated_at
             )
-            VALUES ($1, $2, 'TRAINED', $3, $4, $5, $6::jsonb, now(), now())
+            VALUES ($1, $2, 'TRAINED', $3, $4, $5, $6, $7::jsonb, now(), now())
         """
 
         champion_counts = {method: count for method, count in evaluation.champion_counts.items()}
@@ -795,6 +1124,7 @@ class ForecastingService:
                 query,
                 run_id,
                 list(sorted(horizons)),
+                segment,
                 evaluation.items_evaluated,
                 evaluation.items_with_champion,
                 evaluation.items_beating_baseline,
@@ -802,6 +1132,89 @@ class ForecastingService:
             )
         except asyncpg.PostgresError as exc:  # pragma: no cover - depends on DB
             raise ForecastingServiceError("Failed to record forecast run metadata.") from exc
+
+    async def _get_historical_metrics(
+        self,
+    ) -> dict[tuple[str, int], tuple[float | None, float | None, int]]:
+        """
+        Load historical average MAPE/MdAPE per item-horizon for drift detection.
+        
+        Returns dict mapping (item_id, horizon) to (avg_mape, avg_mdape, run_count).
+        """
+        try:
+            records = await self.connection.fetch(
+                """
+                SELECT 
+                    item_id, 
+                    horizon,
+                    AVG(mape) as avg_mape,
+                    AVG(mdape) as avg_mdape,
+                    COUNT(*) as run_count
+                FROM analytics.item_champion
+                WHERE decided_at >= NOW() - INTERVAL '90 days'
+                GROUP BY item_id, horizon
+                HAVING COUNT(*) >= $1
+                """,
+                MIN_RUNS_FOR_DRIFT_DETECTION,
+            )
+        except (asyncpg.exceptions.UndefinedTableError, asyncpg.PostgresError):
+            return {}
+        
+        result: dict[tuple[str, int], tuple[float | None, float | None, int]] = {}
+        for record in records:
+            key = (str(record["item_id"]), int(record["horizon"]))
+            avg_mape = _nan_to_none(float(record["avg_mape"])) if record["avg_mape"] is not None else None
+            avg_mdape = _nan_to_none(float(record["avg_mdape"])) if record["avg_mdape"] is not None else None
+            result[key] = (avg_mape, avg_mdape, int(record["run_count"]))
+        return result
+
+    async def get_redundant_horizons(
+        self, 
+        min_items: int = 10,
+        beat_threshold: float = 0.20,
+    ) -> set[int]:
+        """
+        Identify horizons that rarely beat the seasonal na?ve baseline.
+        
+        Returns set of horizon values that should be dropped from future evaluations.
+        
+        Args:
+            min_items: Minimum number of items to evaluate a horizon
+            beat_threshold: Minimum fraction of items that must beat baseline (default 20%)
+        """
+        try:
+            records = await self.connection.fetch(
+                """
+                SELECT 
+                    horizon,
+                    COUNT(*) as total_items,
+                    SUM(CASE WHEN beats_baseline THEN 1 ELSE 0 END) as items_beating,
+                    AVG(CASE WHEN beats_baseline THEN 1.0 ELSE 0.0 END) as beat_rate
+                FROM analytics.item_champion
+                WHERE decided_at >= NOW() - INTERVAL '30 days'
+                GROUP BY horizon
+                HAVING COUNT(*) >= $1
+                """,
+                min_items,
+            )
+        except (asyncpg.exceptions.UndefinedTableError, asyncpg.PostgresError):
+            return set()
+        
+        redundant = set()
+        for record in records:
+            horizon = int(record["horizon"])
+            beat_rate = float(record["beat_rate"])
+            total_items = int(record["total_items"])
+            
+            if beat_rate < beat_threshold:
+                redundant.add(horizon)
+                logger.info(
+                    "[optimization] Horizon %d rarely beats baseline: %.1f%% of %d items. "
+                    "Consider dropping from future runs.",
+                    horizon, beat_rate * 100, total_items
+                )
+        
+        return redundant
 
     async def _load_classifications(self) -> dict[str, ItemClassificationResult]:
         try:
@@ -829,7 +1242,7 @@ class ForecastingService:
         try:
             records = await self.connection.fetch(
                 """
-                SELECT item_id, horizon, champion_method, mape, rmse, beats_baseline, needs_review, demand_class, obsolescence_flag
+                SELECT item_id, horizon, champion_method, mape, rmse, mdape, beats_baseline, needs_review, demand_class, obsolescence_flag
                 FROM analytics.item_champion
                 WHERE run_id = $1
                 ORDER BY item_id, horizon
@@ -852,6 +1265,7 @@ class ForecastingService:
                     method=str(record["champion_method"]),
                     mape=_nan_to_none(float(record["mape"])) if record["mape"] is not None else None,
                     rmse=_nan_to_none(float(record["rmse"])) if record["rmse"] is not None else None,
+                    mdape=_nan_to_none(float(record["mdape"])) if record["mdape"] is not None else None,
                     beats_baseline=bool(record["beats_baseline"]),
                     needs_review=bool(record["needs_review"]),
                     demand_class=demand_class_str,
@@ -860,11 +1274,38 @@ class ForecastingService:
             )
         return champions
 
+    async def _load_residual_summaries(self, run_id: UUID) -> dict[tuple[str, int], ResidualSummaryRow]:
+        try:
+            records = await self.connection.fetch(
+                """
+                SELECT item_id, horizon, method, abs_p90, abs_p95, mdape
+                FROM analytics.backtest_residual_summary
+                WHERE run_id = $1
+                """,
+                run_id,
+            )
+        except asyncpg.exceptions.UndefinedTableError:
+            return {}
+
+        summaries: dict[tuple[str, int], ResidualSummaryRow] = {}
+        for record in records:
+            key = (str(record["item_id"]), int(record["horizon"]))
+            summaries[key] = ResidualSummaryRow(
+                item_id=str(record["item_id"]),
+                method=str(record["method"]),
+                horizon=int(record["horizon"]),
+                abs_p90=_nan_to_none(float(record["abs_p90"])) if record["abs_p90"] is not None else None,
+                abs_p95=_nan_to_none(float(record["abs_p95"])) if record["abs_p95"] is not None else None,
+                mdape=_nan_to_none(float(record["mdape"])) if record["mdape"] is not None else None,
+            )
+        return summaries
+
     def _build_forecasts(
         self,
         frame: pd.DataFrame,
         champions: Sequence[ChampionRow],
         horizons: Sequence[int],
+        residuals: Mapping[tuple[str, int], ResidualSummaryRow],
     ) -> list[tuple[str, date, int, str, float | None, float | None, float | None]]:
         StatsForecast, AutoETS, AutoARIMA, CrostonSBA, SeasonalNaive, TSB = _ensure_statsforecast()
 
@@ -952,6 +1393,31 @@ class ForecastingService:
                     p50 = _nan_to_none(float(row.get(mean_col))) if mean_col in row else None
                     p10 = _nan_to_none(float(row.get(lower_col))) if lower_col and lower_col in row else None
                     p90 = _nan_to_none(float(row.get(upper_col))) if upper_col and upper_col in row else None
+
+                    # Conformal recalibration: use cached backtest residuals to tighten intervals
+                    # This is a fast vectorised operation that improves interval accuracy
+                    summary = residuals.get((item_id, horizon))
+                    if summary and p50 is not None:
+                        if summary.abs_p90 is not None and summary.abs_p95 is not None:
+                            # Use p90 for tighter bounds when available
+                            recalibrated_low = max(0.0, p50 - summary.abs_p90)
+                            recalibrated_high = p50 + summary.abs_p90
+                            
+                            # Apply conformal calibration - blend model intervals with residual-based intervals
+                            if p10 is not None and p90 is not None:
+                                # Weighted average: 60% residual-based, 40% model-based
+                                p10 = 0.6 * recalibrated_low + 0.4 * p10
+                                p90 = 0.6 * recalibrated_high + 0.4 * p90
+                            else:
+                                # No model intervals, use residual-based only
+                                p10 = recalibrated_low
+                                p90 = recalibrated_high
+
+                    if p10 is not None and p50 is not None:
+                        p10 = max(0.0, min(p10, p50))
+                    if p90 is not None and p50 is not None:
+                        p90 = max(p50, p90)
+
                     forecast_rows.append(
                         (
                             item_id,

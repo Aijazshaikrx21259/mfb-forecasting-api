@@ -32,6 +32,8 @@ class Settings:
     pipeline_run_on_demand: bool
     pipeline_interval_minutes: int
     pipeline_initial_delay_seconds: int
+    pipeline_stable_interval_minutes: int | None
+    pipeline_volatile_interval_minutes: int | None
 
 
 @lru_cache
@@ -56,6 +58,22 @@ def get_settings() -> Settings:
         pipeline_initial_delay_seconds = int(os.getenv("PIPELINE_INITIAL_DELAY_SECONDS", "60"))
     except ValueError:
         pipeline_initial_delay_seconds = 60
+    
+    # Segmented pipeline intervals for stable vs volatile items
+    pipeline_stable_interval_minutes = None
+    pipeline_volatile_interval_minutes = None
+    stable_env = os.getenv("PIPELINE_STABLE_INTERVAL_MINUTES")
+    volatile_env = os.getenv("PIPELINE_VOLATILE_INTERVAL_MINUTES")
+    if stable_env:
+        try:
+            pipeline_stable_interval_minutes = int(stable_env)
+        except ValueError:
+            pass
+    if volatile_env:
+        try:
+            pipeline_volatile_interval_minutes = int(volatile_env)
+        except ValueError:
+            pass
 
     if env_lower == "production":
         if not allowed_origins_env:
@@ -78,4 +96,6 @@ def get_settings() -> Settings:
         pipeline_run_on_demand=pipeline_run_on_demand,
         pipeline_interval_minutes=max(pipeline_interval_minutes, 1),
         pipeline_initial_delay_seconds=max(pipeline_initial_delay_seconds, 0),
+        pipeline_stable_interval_minutes=pipeline_stable_interval_minutes,
+        pipeline_volatile_interval_minutes=pipeline_volatile_interval_minutes,
     )
