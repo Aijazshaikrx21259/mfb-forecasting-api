@@ -53,3 +53,9 @@ docker-compose.override.yml
 
 # Migration data
 migration/data/
+
+# Reports
+reports/
+
+# Local scripts
+scripts/generate_code_statistics.py
