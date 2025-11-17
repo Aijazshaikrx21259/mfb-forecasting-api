@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS analytics.backtest_metrics (
     method text NOT NULL,
     mape double precision,
     rmse double precision,
+    mdape double precision,
     beats_baseline boolean,
     fold_count int,
     mape_denominator_count int,
@@ -35,12 +36,25 @@ CREATE TABLE IF NOT EXISTS analytics.item_champion (
     champion_method text NOT NULL,
     mape double precision,
     rmse double precision,
+    mdape double precision,
     beats_baseline boolean,
     needs_review boolean DEFAULT FALSE,
     demand_class text,
     obsolescence_flag boolean,
     decided_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (run_id, item_id, horizon)
+);
+
+CREATE TABLE IF NOT EXISTS analytics.backtest_residual_summary (
+    run_id uuid NOT NULL,
+    item_id text NOT NULL,
+    horizon int NOT NULL,
+    method text NOT NULL,
+    abs_p90 double precision,
+    abs_p95 double precision,
+    mdape double precision,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, item_id, horizon, method)
 );
 
 CREATE TABLE IF NOT EXISTS analytics.forecast_item_month (
@@ -76,10 +90,13 @@ COMMENT ON TABLE analytics.item_classification IS
     'Stores ADI/CV^2 demand class derived from core.item_month_demand and the obsolescence flag used to gate TSB.';
 
 COMMENT ON TABLE analytics.backtest_metrics IS
-    'Rolling-origin cross-validation metrics (MAPE/RMSE) per item/horizon/method.';
+    'Rolling-origin cross-validation metrics (MAPE/RMSE/MdAPE) per item/horizon/method.';
 
 COMMENT ON TABLE analytics.item_champion IS
-    'Champion method per item & horizon with guardrail flags.';
+    'Champion method per item & horizon with guardrail flags and MdAPE.';
+
+COMMENT ON TABLE analytics.backtest_residual_summary IS
+    'Stores residual quantiles (abs_p90/abs_p95) and MdAPE per item/horizon from rolling-origin CV.';
 
 COMMENT ON TABLE analytics.forecast_item_month IS
     'Latest run forecasts (p50/p10/p90) per item, horizon, and period.';
@@ -87,3 +104,16 @@ COMMENT ON TABLE analytics.forecast_item_month IS
 COMMENT ON TABLE analytics.forecast_run IS
     'Metadata for forecasting pipeline runs orchestrated via the FastAPI endpoints.';
 
+CREATE TABLE IF NOT EXISTS analytics.forecast_alert (
+    run_id uuid NOT NULL,
+    item_id text NOT NULL,
+    horizon int NOT NULL,
+    method text NOT NULL,
+    metric text NOT NULL,
+    value double precision,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, item_id, horizon, method, metric)
+);
+
+COMMENT ON TABLE analytics.forecast_alert IS
+    'Threshold and drift alerts emitted by the forecasting pipeline.';
