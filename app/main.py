@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.config import get_settings
 from app.db import close_db_pool, init_db_pool
-from app.routers import adjustments, alert_preferences, alerts, backtest, data_quality, forecast, health
+from app.routers import adjustments, alert_preferences, alerts, backtest, data_quality, forecast, health, metrics
 from app.services.pipeline_scheduler import ForecastPipelineScheduler
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,7 @@ def create_application() -> FastAPI:
     app.include_router(backtest.router)
     app.include_router(data_quality.router)
     app.include_router(forecast.router)
+    app.include_router(metrics.router)
 
     @app.on_event("startup")
     async def startup_event() -> None:
