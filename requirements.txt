@@ -5,5 +5,7 @@ numpy==1.26.4
 pandas==2.2.2
 scipy==1.11.4
 statsforecast==1.6.0
+python-dateutil==2.8.2
+pydantic==2.5.0
 
 
