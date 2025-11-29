@@ -1,6 +1,15 @@
 # MFB Forecasting API
 
-FastAPI service that exposes forecasting capabilities. The project currently provides a basic health endpoint and is structured to scale with additional routers and domain logic.
+FastAPI service providing demand forecasting, alerts, forecast adjustments, and data quality management for Maryland Food Bank's purchase planning operations.
+
+## Features
+
+✅ **Forecasting** - ETS, Croston-SBA, TSB models with champion selection  
+✅ **Alerts** - In-app notifications for forecast events  
+✅ **Adjustments** - Manual forecast overrides with approval workflow  
+✅ **Backtesting** - Rolling-origin cross-validation  
+✅ **Data Quality** - Anomaly detection and flagging  
+✅ **Metrics** - System performance and cost tracking
 
 ## 🚀 Deploy to Render (Free Tier)
 
