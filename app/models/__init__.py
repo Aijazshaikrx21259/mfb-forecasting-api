@@ -10,6 +10,13 @@ from app.models.alerts import (
     AlertPriority,
     AlertStatus,
 )
+from app.models.adjustments import (
+    AdjustmentCreate,
+    AdjustmentResponse,
+    AdjustmentUpdate,
+    AdjustmentReview,
+    AdjustmentStatus,
+)
 
 __all__ = [
     "AlertCreate",
@@ -20,4 +27,9 @@ __all__ = [
     "AlertType",
     "AlertPriority",
     "AlertStatus",
+    "AdjustmentCreate",
+    "AdjustmentResponse",
+    "AdjustmentUpdate",
+    "AdjustmentReview",
+    "AdjustmentStatus",
 ]
