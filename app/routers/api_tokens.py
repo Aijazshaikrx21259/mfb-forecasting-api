@@ -159,11 +159,11 @@ async def list_tokens(
         ) from exc
 
 
-@router.delete("/{token_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{token_id}")
 async def revoke_token(
     token_id: UUID,
     connection: asyncpg.Connection = Depends(get_db_connection),
-) -> None:
+):
     """
     Revoke (deactivate) an API token.
     
@@ -185,6 +185,8 @@ async def revoke_token(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Token not found.",
             )
+        
+        return {"message": "Token revoked successfully"}
             
     except asyncpg.exceptions.UndefinedTableError:
         raise HTTPException(
