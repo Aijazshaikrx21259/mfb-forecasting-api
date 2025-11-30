@@ -136,6 +136,26 @@ class ModelTransparencyResponse(BaseModel):
     run_id: UUID
 
 
+class PerformanceTrendPoint(BaseModel):
+    """Performance metric at a specific point in time."""
+    run_id: UUID
+    created_at: datetime
+    horizon_months: int
+    mean_mape: float | None
+    mean_rmse: float | None
+    items_evaluated: int
+    pct_items_beating_sn: float | None
+
+
+class PerformanceSummaryResponse(BaseModel):
+    """Comprehensive performance summary with trends."""
+    current_run: BacktestOverallSummary | None
+    historical_trend: list[PerformanceTrendPoint]
+    method_performance: dict[str, dict[str, float | int]]  # method -> {avg_mape, avg_rmse, count}
+    accuracy_distribution: dict[str, int]  # MAPE ranges -> count
+    total_runs: int
+
+
 router = APIRouter(
     prefix="/api/backtest",
     tags=["backtest"],
@@ -735,4 +755,172 @@ async def get_model_transparency(
         method_distribution=method_distribution,
         items=items,
         run_id=resolved_run_id,
+    )
+
+
+@router.get("/performance-summary", response_model=PerformanceSummaryResponse)
+async def get_performance_summary(
+    horizon: int = Query(default=1, ge=1, description="Forecast horizon to analyze."),
+    limit_runs: int = Query(default=10, ge=1, le=50, description="Number of historical runs to include."),
+    connection: asyncpg.Connection = Depends(get_db_connection),
+) -> PerformanceSummaryResponse:
+    """
+    Return comprehensive performance summary with historical trends and method comparison.
+    
+    This endpoint supports US #14: Forecast Performance Tracking.
+    """
+    
+    try:
+        # Get current run summary
+        current_run_records = await connection.fetch(
+            """
+            SELECT *
+            FROM analytics.backtest_overall_summary
+            WHERE horizon_months = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            horizon,
+        )
+        
+        current_run = None
+        if current_run_records:
+            record = current_run_records[0]
+            current_run = BacktestOverallSummary(
+                horizon_months=record["horizon_months"],
+                items_evaluated=record.get("items_evaluated", 0),
+                pct_items_mape_lt_30=_decimal_to_float(record.get("pct_items_mape_lt_30")),
+                pct_items_beating_sn=_decimal_to_float(record.get("pct_items_beating_sn")),
+                mean_mape=_decimal_to_float(record.get("mean_mape")),
+                mean_rmse=_decimal_to_float(record.get("mean_rmse")),
+                run_id=record["run_id"],
+                created_at=record["created_at"],
+            )
+        
+        # Get historical trend
+        trend_records = await connection.fetch(
+            """
+            SELECT 
+                run_id,
+                created_at,
+                horizon_months,
+                mean_mape,
+                mean_rmse,
+                items_evaluated,
+                pct_items_beating_sn
+            FROM analytics.backtest_overall_summary
+            WHERE horizon_months = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            horizon,
+            limit_runs,
+        )
+        
+        historical_trend = [
+            PerformanceTrendPoint(
+                run_id=record["run_id"],
+                created_at=record["created_at"],
+                horizon_months=record["horizon_months"],
+                mean_mape=_decimal_to_float(record.get("mean_mape")),
+                mean_rmse=_decimal_to_float(record.get("mean_rmse")),
+                items_evaluated=record.get("items_evaluated", 0),
+                pct_items_beating_sn=_decimal_to_float(record.get("pct_items_beating_sn")),
+            )
+            for record in trend_records
+        ]
+        
+        # Get method performance (from latest run)
+        if current_run:
+            method_records = await connection.fetch(
+                """
+                SELECT 
+                    model_name,
+                    AVG(mape) as avg_mape,
+                    AVG(rmse) as avg_rmse,
+                    COUNT(*) as count
+                FROM analytics.backtest_item_summary
+                WHERE run_id = $1
+                  AND horizon_months = $2
+                GROUP BY model_name
+                ORDER BY count DESC
+                """,
+                current_run.run_id,
+                horizon,
+            )
+            
+            method_performance = {
+                record["model_name"]: {
+                    "avg_mape": _decimal_to_float(record.get("avg_mape")) or 0.0,
+                    "avg_rmse": _decimal_to_float(record.get("avg_rmse")) or 0.0,
+                    "count": record.get("count", 0),
+                }
+                for record in method_records
+            }
+        else:
+            method_performance = {}
+        
+        # Get accuracy distribution (MAPE ranges)
+        if current_run:
+            accuracy_records = await connection.fetch(
+                """
+                SELECT 
+                    CASE 
+                        WHEN mape IS NULL THEN 'Unknown'
+                        WHEN mape < 10 THEN '0-10%'
+                        WHEN mape < 20 THEN '10-20%'
+                        WHEN mape < 30 THEN '20-30%'
+                        WHEN mape < 50 THEN '30-50%'
+                        ELSE '50%+'
+                    END as mape_range,
+                    COUNT(*) as count
+                FROM analytics.backtest_item_summary
+                WHERE run_id = $1
+                  AND horizon_months = $2
+                GROUP BY mape_range
+                ORDER BY 
+                    CASE mape_range
+                        WHEN '0-10%' THEN 1
+                        WHEN '10-20%' THEN 2
+                        WHEN '20-30%' THEN 3
+                        WHEN '30-50%' THEN 4
+                        WHEN '50%+' THEN 5
+                        ELSE 6
+                    END
+                """,
+                current_run.run_id,
+                horizon,
+            )
+            
+            accuracy_distribution = {
+                record["mape_range"]: record["count"]
+                for record in accuracy_records
+            }
+        else:
+            accuracy_distribution = {}
+        
+        # Get total number of runs
+        total_runs_record = await connection.fetchval(
+            """
+            SELECT COUNT(DISTINCT run_id)
+            FROM analytics.backtest_overall_summary
+            WHERE horizon_months = $1
+            """,
+            horizon,
+        )
+        
+        total_runs = total_runs_record or 0
+        
+    except asyncpg.exceptions.UndefinedTableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backtest summary tables are not available in the database.",
+        ) from exc
+    
+    return PerformanceSummaryResponse(
+        current_run=current_run,
+        historical_trend=historical_trend,
+        method_performance=method_performance,
+        accuracy_distribution=accuracy_distribution,
+        total_runs=int(total_runs),
     )
