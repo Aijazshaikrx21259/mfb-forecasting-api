@@ -864,37 +864,32 @@ async def get_performance_summary(
         if current_run:
             accuracy_records = await connection.fetch(
                 """
-                SELECT 
-                    CASE 
-                        WHEN mape IS NULL THEN 'Unknown'
-                        WHEN mape < 10 THEN '0-10%'
-                        WHEN mape < 20 THEN '10-20%'
-                        WHEN mape < 30 THEN '20-30%'
-                        WHEN mape < 50 THEN '30-50%'
-                        ELSE '50%+'
-                    END as mape_range,
-                    COUNT(*) as count
-                FROM analytics.backtest_item_summary
-                WHERE run_id = $1
-                  AND horizon_months = $2
-                GROUP BY 
-                    CASE 
-                        WHEN mape IS NULL THEN 'Unknown'
-                        WHEN mape < 10 THEN '0-10%'
-                        WHEN mape < 20 THEN '10-20%'
-                        WHEN mape < 30 THEN '20-30%'
-                        WHEN mape < 50 THEN '30-50%'
-                        ELSE '50%+'
-                    END
-                ORDER BY 
-                    CASE 
-                        WHEN mape IS NULL THEN 6
-                        WHEN mape < 10 THEN 1
-                        WHEN mape < 20 THEN 2
-                        WHEN mape < 30 THEN 3
-                        WHEN mape < 50 THEN 4
-                        ELSE 5
-                    END
+                WITH mape_ranges AS (
+                    SELECT 
+                        CASE 
+                            WHEN mape IS NULL THEN 'Unknown'
+                            WHEN mape < 10 THEN '0-10%'
+                            WHEN mape < 20 THEN '10-20%'
+                            WHEN mape < 30 THEN '20-30%'
+                            WHEN mape < 50 THEN '30-50%'
+                            ELSE '50%+'
+                        END as mape_range,
+                        CASE 
+                            WHEN mape IS NULL THEN 6
+                            WHEN mape < 10 THEN 1
+                            WHEN mape < 20 THEN 2
+                            WHEN mape < 30 THEN 3
+                            WHEN mape < 50 THEN 4
+                            ELSE 5
+                        END as sort_order
+                    FROM analytics.backtest_item_summary
+                    WHERE run_id = $1
+                      AND horizon_months = $2
+                )
+                SELECT mape_range, COUNT(*) as count
+                FROM mape_ranges
+                GROUP BY mape_range, sort_order
+                ORDER BY sort_order
                 """,
                 current_run.run_id,
                 horizon,
