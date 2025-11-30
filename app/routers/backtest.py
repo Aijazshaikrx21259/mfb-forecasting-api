@@ -114,6 +114,28 @@ class BacktestBenchmarkResponse(BaseModel):
     description: str
 
 
+class ModelMethodInfo(BaseModel):
+    """Information about a forecasting method used for an item."""
+    item_id: str
+    champion_method: str
+    horizon_months: int
+    last_trained_at: datetime | None = None
+    mape: float | None = None
+    rmse: float | None = None
+    beats_benchmark: bool
+    run_id: UUID
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ModelTransparencyResponse(BaseModel):
+    """Aggregated model transparency information."""
+    total_items: int
+    method_distribution: dict[str, int]  # method_name -> count
+    items: list[ModelMethodInfo]
+    run_id: UUID
+
+
 router = APIRouter(
     prefix="/api/backtest",
     tags=["backtest"],
@@ -592,4 +614,125 @@ async def describe_benchmark_method() -> BacktestBenchmarkResponse:
             "Forecasts each month using the actuals from the same month one year prior. "
             "Used as a benchmark to evaluate ETS, Croston-SBA, and TSB models."
         ),
+    )
+
+
+@router.get("/model-transparency", response_model=ModelTransparencyResponse)
+async def get_model_transparency(
+    horizon: int = Query(default=1, ge=1, description="Forecast horizon to analyze."),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=MAX_PAGE_SIZE),
+    run_id: UUID | None = Query(
+        default=None, description="Specific backtest run identifier. Defaults to latest run."
+    ),
+    connection: asyncpg.Connection = Depends(get_db_connection),
+) -> ModelTransparencyResponse:
+    """
+    Return model transparency information showing which forecasting method 
+    was selected for each item and when it was last trained.
+    
+    This endpoint supports US #13: Model Transparency Dashboard.
+    """
+    
+    resolved_run_id = await _resolve_latest_run_id(
+        connection,
+        "analytics.backtest_item_summary",
+        run_id,
+        allow_missing=True,
+    )
+    
+    if resolved_run_id is None:
+        return ModelTransparencyResponse(
+            total_items=0,
+            method_distribution={},
+            items=[],
+            run_id=uuid4(),
+        )
+    
+    offset = (page - 1) * page_size
+    
+    try:
+        # Get items with their champion methods
+        records = await connection.fetch(
+            """
+            SELECT 
+                item_id,
+                model_name as champion_method,
+                horizon_months,
+                created_at as last_trained_at,
+                mape,
+                rmse,
+                beats_benchmark,
+                run_id,
+                COUNT(*) OVER() AS total_count
+            FROM analytics.backtest_item_summary
+            WHERE run_id = $1
+              AND horizon_months = $2
+            ORDER BY item_id
+            LIMIT $3 OFFSET $4
+            """,
+            resolved_run_id,
+            horizon,
+            page_size,
+            offset,
+        )
+        
+        # Get method distribution for all items (not just current page)
+        distribution_records = await connection.fetch(
+            """
+            SELECT 
+                model_name,
+                COUNT(*) as count
+            FROM analytics.backtest_item_summary
+            WHERE run_id = $1
+              AND horizon_months = $2
+            GROUP BY model_name
+            ORDER BY count DESC
+            """,
+            resolved_run_id,
+            horizon,
+        )
+        
+    except asyncpg.exceptions.UndefinedTableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backtest item summary table is not available in the database.",
+        ) from exc
+    
+    if not records:
+        return ModelTransparencyResponse(
+            total_items=0,
+            method_distribution={},
+            items=[],
+            run_id=resolved_run_id,
+        )
+    
+    total_count = records[0].get("total_count", 0)
+    
+    # Build method distribution
+    method_distribution = {
+        record["model_name"]: record["count"]
+        for record in distribution_records
+    }
+    
+    # Build items list
+    items = [
+        ModelMethodInfo(
+            item_id=record["item_id"],
+            champion_method=record["champion_method"],
+            horizon_months=record["horizon_months"],
+            last_trained_at=record.get("last_trained_at"),
+            mape=_decimal_to_float(record.get("mape")),
+            rmse=_decimal_to_float(record.get("rmse")),
+            beats_benchmark=record.get("beats_benchmark", False),
+            run_id=record["run_id"],
+        )
+        for record in records
+    ]
+    
+    return ModelTransparencyResponse(
+        total_items=int(total_count),
+        method_distribution=method_distribution,
+        items=items,
+        run_id=resolved_run_id,
     )
