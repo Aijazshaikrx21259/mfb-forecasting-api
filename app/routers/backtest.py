@@ -877,15 +877,23 @@ async def get_performance_summary(
                 FROM analytics.backtest_item_summary
                 WHERE run_id = $1
                   AND horizon_months = $2
-                GROUP BY mape_range
+                GROUP BY 
+                    CASE 
+                        WHEN mape IS NULL THEN 'Unknown'
+                        WHEN mape < 10 THEN '0-10%'
+                        WHEN mape < 20 THEN '10-20%'
+                        WHEN mape < 30 THEN '20-30%'
+                        WHEN mape < 50 THEN '30-50%'
+                        ELSE '50%+'
+                    END
                 ORDER BY 
-                    CASE mape_range
-                        WHEN '0-10%' THEN 1
-                        WHEN '10-20%' THEN 2
-                        WHEN '20-30%' THEN 3
-                        WHEN '30-50%' THEN 4
-                        WHEN '50%+' THEN 5
-                        ELSE 6
+                    CASE 
+                        WHEN mape IS NULL THEN 6
+                        WHEN mape < 10 THEN 1
+                        WHEN mape < 20 THEN 2
+                        WHEN mape < 30 THEN 3
+                        WHEN mape < 50 THEN 4
+                        ELSE 5
                     END
                 """,
                 current_run.run_id,
