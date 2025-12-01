@@ -275,6 +275,27 @@ async def generate_forecasts(
     except ForecastingServiceError as exc:
         raise _map_service_error(exc) from exc
 
+    # Generate alerts automatically after forecast completion
+    try:
+        from app.services.alert_generator import generate_purchase_alerts, generate_forecast_ready_alert
+        
+        # Generate purchase alerts for top items
+        await generate_purchase_alerts(connection, str(resolved_run_id), user_ids=["all-users"])
+        
+        # Generate forecast ready notification
+        await generate_forecast_ready_alert(
+            connection, 
+            str(resolved_run_id),
+            summary["items_forecasted"],
+            distinct_horizons,
+            user_ids=["all-users"]
+        )
+        
+        logger.info(f"Generated alerts for forecast run {resolved_run_id}")
+    except Exception as e:
+        # Don't fail the forecast if alert generation fails
+        logger.warning(f"Failed to generate alerts: {e}")
+
     return ForecastGenerationResponse(
         run_id=resolved_run_id,
         horizons=distinct_horizons,
