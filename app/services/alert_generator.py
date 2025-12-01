@@ -3,6 +3,7 @@
 import json
 from typing import List
 import asyncpg
+from datetime import datetime, timedelta
 
 
 async def generate_purchase_alerts(
@@ -129,5 +130,122 @@ async def generate_forecast_ready_alert(
             alerts_created += 1
         except Exception:
             pass
+    
+    return alerts_created
+
+
+async def generate_deviation_alerts(
+    connection: asyncpg.Connection,
+    run_id: str,
+    user_ids: List[str] = None,
+    deviation_threshold: float = 30.0
+) -> int:
+    """
+    Generate alerts for items where forecast deviates significantly from historical average.
+    
+    This supports US #17: Smart Alert System for demand deviations.
+    
+    Args:
+        connection: Database connection
+        run_id: Forecast run ID
+        user_ids: List of user IDs to notify
+        deviation_threshold: Percentage deviation threshold (default 30%)
+    
+    Returns:
+        Number of alerts created
+    """
+    
+    if not user_ids:
+        user_ids = ["all-users"]
+    
+    # Find items where forecast deviates significantly from historical average
+    deviating_items = await connection.fetch("""
+        WITH historical_avg AS (
+            SELECT 
+                item_id,
+                AVG(demand) as avg_demand
+            FROM analytics.item_month_demand
+            WHERE demand > 0
+            GROUP BY item_id
+        ),
+        forecast_data AS (
+            SELECT 
+                item_id,
+                p50 as forecast
+            FROM analytics.forecast_item_month
+            WHERE run_id = $1
+            AND horizon_months = 1
+            AND p50 IS NOT NULL
+        )
+        SELECT 
+            f.item_id,
+            f.forecast,
+            h.avg_demand,
+            CASE 
+                WHEN h.avg_demand > 0 THEN 
+                    ABS((f.forecast - h.avg_demand) / h.avg_demand * 100)
+                ELSE 0
+            END as deviation_pct,
+            CASE
+                WHEN f.forecast > h.avg_demand THEN 'INCREASE'
+                ELSE 'DECREASE'
+            END as direction
+        FROM forecast_data f
+        INNER JOIN historical_avg h ON f.item_id = h.item_id
+        WHERE h.avg_demand > 0
+        AND ABS((f.forecast - h.avg_demand) / h.avg_demand * 100) > $2
+        ORDER BY deviation_pct DESC
+        LIMIT 10
+    """, run_id, deviation_threshold)
+    
+    if not deviating_items:
+        return 0
+    
+    alerts_created = 0
+    
+    # Calculate summary stats
+    increases = [item for item in deviating_items if item['direction'] == 'INCREASE']
+    decreases = [item for item in deviating_items if item['direction'] == 'DECREASE']
+    
+    for user_id in user_ids:
+        # Alert for significant increases
+        if increases:
+            try:
+                await connection.fetchval("""
+                    SELECT alerts.create_alert_from_template(
+                        $1::TEXT,
+                        'high_demand_spike'::TEXT,
+                        $2::JSONB,
+                        '/items'::TEXT,
+                        72
+                    )
+                """, user_id, json.dumps({
+                    'items_count': str(len(increases)),
+                    'threshold': f"{deviation_threshold:.0f}",
+                    'top_items': ', '.join([item['item_id'] for item in increases[:3]])
+                }))
+                alerts_created += 1
+            except Exception:
+                pass
+        
+        # Alert for significant decreases
+        if decreases:
+            try:
+                await connection.fetchval("""
+                    SELECT alerts.create_alert_from_template(
+                        $1::TEXT,
+                        'low_demand_drop'::TEXT,
+                        $2::JSONB,
+                        '/items'::TEXT,
+                        72
+                    )
+                """, user_id, json.dumps({
+                    'items_count': str(len(decreases)),
+                    'threshold': f"{deviation_threshold:.0f}",
+                    'top_items': ', '.join([item['item_id'] for item in decreases[:3]])
+                }))
+                alerts_created += 1
+            except Exception:
+                pass
     
     return alerts_created

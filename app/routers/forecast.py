@@ -277,10 +277,17 @@ async def generate_forecasts(
 
     # Generate alerts automatically after forecast completion
     try:
-        from app.services.alert_generator import generate_purchase_alerts, generate_forecast_ready_alert
+        from app.services.alert_generator import (
+            generate_purchase_alerts,
+            generate_forecast_ready_alert,
+            generate_deviation_alerts
+        )
         
         # Generate purchase alerts for top items
         await generate_purchase_alerts(connection, str(resolved_run_id), user_ids=["all-users"])
+        
+        # Generate deviation alerts (US #17)
+        await generate_deviation_alerts(connection, str(resolved_run_id), user_ids=["all-users"])
         
         # Generate forecast ready notification
         await generate_forecast_ready_alert(
