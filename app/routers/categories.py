@@ -176,17 +176,19 @@ async def get_category_forecast(
     """
     
     try:
-        # Get forecast data
+        # Get forecast data with categories from dim_item
         records = await connection.fetch(
             """
             SELECT 
-                item_id,
-                p50,
-                horizon_months
-            FROM analytics.forecast_item_month
-            WHERE horizon_months = $1
-              AND p50 IS NOT NULL
-            ORDER BY item_id
+                COALESCE(di.category, 'Other') as category,
+                SUM(f.p50) as total_forecast,
+                COUNT(DISTINCT f.item_id) as item_count
+            FROM analytics.forecast_item_month f
+            LEFT JOIN core.dim_item di ON f.item_id = di.item_id
+            WHERE f.horizon_months = $1
+              AND f.p50 IS NOT NULL
+            GROUP BY di.category
+            ORDER BY total_forecast DESC
             """,
             horizon,
         )
@@ -194,32 +196,19 @@ async def get_category_forecast(
         if not records:
             return []
         
-        # Aggregate by category
-        category_data: dict[str, dict] = {}
-        
-        for record in records:
-            item_id = record["item_id"]
-            forecast = float(record["p50"]) if record["p50"] is not None else 0.0
-            category = _extract_category_from_item_id(item_id)
-            
-            if category not in category_data:
-                category_data[category] = {
-                    "total_forecast": 0.0,
-                    "item_count": 0,
-                }
-            
-            category_data[category]["total_forecast"] += forecast
-            category_data[category]["item_count"] += 1
-        
         # Build response
         result = []
-        for category, data in sorted(category_data.items()):
-            avg_forecast = data["total_forecast"] / data["item_count"] if data["item_count"] > 0 else 0.0
+        for record in records:
+            category = record["category"] or "Other"
+            total_forecast = float(record["total_forecast"]) if record["total_forecast"] else 0.0
+            item_count = record["item_count"]
+            avg_forecast = total_forecast / item_count if item_count > 0 else 0.0
+            
             result.append(
                 CategoryForecastResponse(
                     category=category,
-                    total_forecast=data["total_forecast"],
-                    item_count=data["item_count"],
+                    total_forecast=total_forecast,
+                    item_count=item_count,
                     avg_forecast_per_item=avg_forecast,
                     horizon_months=horizon,
                 )
