@@ -302,6 +302,16 @@ class AlertService:
 
     def _row_to_alert(self, row: asyncpg.Record) -> AlertResponse:
         """Convert database row to AlertResponse."""
+        import json
+        
+        # Parse metadata if it's a JSON string
+        metadata = row["metadata"]
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except (json.JSONDecodeError, TypeError):
+                metadata = None
+        
         return AlertResponse(
             alert_id=row["alert_id"],
             user_id=row["user_id"],
@@ -310,7 +320,7 @@ class AlertService:
             status=AlertStatus(row["status"]),
             title=row["title"],
             message=row["message"],
-            metadata=row["metadata"],
+            metadata=metadata,
             action_url=row["action_url"],
             action_label=row["action_label"],
             created_at=row["created_at"],
