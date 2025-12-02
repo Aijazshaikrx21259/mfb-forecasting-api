@@ -14,26 +14,20 @@ from pydantic import BaseModel
 class SystemMetrics(BaseModel):
     """System performance metrics."""
     
-    total_requests: int
-    avg_response_time_ms: float
-    error_rate_pct: float
-    active_users: int
-    forecast_runs_today: int
-    alerts_generated_today: int
-    adjustments_pending: int
-    timestamp: datetime
+    database_size_mb: float
+    total_items: int
+    total_forecasts: int
+    last_pipeline_run: datetime | None
+    avg_api_response_ms: float
 
 
 class CostEstimate(BaseModel):
     """Cloud cost estimation."""
     
-    database_queries_today: int
-    estimated_db_cost_usd: float
-    api_requests_today: int
-    estimated_api_cost_usd: float
-    total_estimated_cost_usd: float
-    period_start: datetime
-    period_end: datetime
+    daily_cost_usd: float
+    monthly_estimate_usd: float
+    database_storage_cost: float
+    compute_cost: float
 
 
 router = APIRouter(
@@ -48,20 +42,37 @@ async def get_system_metrics(
     conn: Annotated[asyncpg.Connection, Depends(get_db_connection)],
 ) -> SystemMetrics:
     """
-    Get current system performance metrics.
+    Get current system performance metrics from Neon database.
     
     Returns operational metrics for monitoring dashboard.
     """
-    # Mock data for now - would be collected from actual metrics store
+    # Get database size in MB
+    db_size_bytes = await conn.fetchval(
+        "SELECT pg_database_size(current_database())"
+    )
+    db_size_mb = db_size_bytes / (1024 * 1024) if db_size_bytes else 0
+    
+    # Get total items
+    total_items = await conn.fetchval(
+        "SELECT COUNT(*) FROM core.dim_item"
+    ) or 0
+    
+    # Get total forecasts
+    total_forecasts = await conn.fetchval(
+        "SELECT COUNT(*) FROM analytics.forecast_item_month"
+    ) or 0
+    
+    # Get last pipeline run
+    last_run = await conn.fetchval(
+        "SELECT MAX(created_at) FROM analytics.forecast_run"
+    )
+    
     return SystemMetrics(
-        total_requests=12500,
-        avg_response_time_ms=245.5,
-        error_rate_pct=0.5,
-        active_users=15,
-        forecast_runs_today=3,
-        alerts_generated_today=42,
-        adjustments_pending=8,
-        timestamp=datetime.utcnow(),
+        database_size_mb=db_size_mb,
+        total_items=total_items,
+        total_forecasts=total_forecasts,
+        last_pipeline_run=last_run,
+        avg_api_response_ms=125.0,  # Would be from metrics collection
     )
 
 
@@ -71,27 +82,27 @@ async def get_cost_estimate(
     conn: Annotated[asyncpg.Connection, Depends(get_db_connection)] = None,
 ) -> CostEstimate:
     """
-    Get estimated cloud costs for the specified period.
+    Get estimated Neon cloud costs based on database size.
     
     - **days**: Number of days to estimate (1-30)
     """
-    # Mock cost estimation - would be calculated from actual usage
-    db_queries = 50000 * days
-    api_requests = 10000 * days
+    # Get database size for cost calculation
+    db_size_bytes = await conn.fetchval(
+        "SELECT pg_database_size(current_database())"
+    ) if conn else 0
+    db_size_gb = (db_size_bytes / (1024 ** 3)) if db_size_bytes else 0
     
-    # Rough estimates (adjust based on actual pricing)
-    db_cost = (db_queries / 1000000) * 0.25  # $0.25 per million queries
-    api_cost = (api_requests / 1000000) * 0.10  # $0.10 per million requests
+    # Neon pricing estimates (adjust based on actual plan)
+    # Free tier: 0.5 GB, Paid: ~$0.10/GB/month for storage
+    storage_cost_per_day = (db_size_gb * 0.10) / 30 if db_size_gb > 0.5 else 0
+    compute_cost_per_day = 0.50  # Estimated compute cost per day
     
-    period_end = datetime.utcnow()
-    period_start = period_end - timedelta(days=days)
+    daily_cost = storage_cost_per_day + compute_cost_per_day
+    monthly_estimate = daily_cost * 30
     
     return CostEstimate(
-        database_queries_today=db_queries,
-        estimated_db_cost_usd=round(db_cost, 2),
-        api_requests_today=api_requests,
-        estimated_api_cost_usd=round(api_cost, 2),
-        total_estimated_cost_usd=round(db_cost + api_cost, 2),
-        period_start=period_start,
-        period_end=period_end,
+        daily_cost_usd=round(daily_cost, 2),
+        monthly_estimate_usd=round(monthly_estimate, 2),
+        database_storage_cost=round(storage_cost_per_day, 2),
+        compute_cost=round(compute_cost_per_day, 2),
     )
