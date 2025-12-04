@@ -672,44 +672,48 @@ async def get_model_transparency(
     offset = (page - 1) * page_size
     
     try:
-        # Get items with their champion methods
+        # Get items with their champion methods from item_champion table
+        # Use DISTINCT ON to get only the latest entry per item
         records = await connection.fetch(
             """
-            SELECT 
+            SELECT DISTINCT ON (item_id)
                 item_id,
-                model_name as champion_method,
-                horizon_months,
-                created_at as last_trained_at,
+                champion_method,
+                horizon as horizon_months,
+                decided_at as last_trained_at,
                 mape,
                 rmse,
-                beats_benchmark,
+                beats_baseline as beats_benchmark,
                 run_id,
                 COUNT(*) OVER() AS total_count
-            FROM analytics.backtest_item_summary
-            WHERE run_id = $1
-              AND horizon_months = $2
-            ORDER BY item_id
-            LIMIT $3 OFFSET $4
+            FROM analytics.item_champion
+            WHERE horizon = $1
+            ORDER BY item_id, decided_at DESC
+            LIMIT $2 OFFSET $3
             """,
-            resolved_run_id,
             horizon,
             page_size,
             offset,
         )
         
         # Get method distribution for all items (not just current page)
+        # Get latest champion per item, then count by method
         distribution_records = await connection.fetch(
             """
             SELECT 
-                model_name,
+                champion_method as model_name,
                 COUNT(*) as count
-            FROM analytics.backtest_item_summary
-            WHERE run_id = $1
-              AND horizon_months = $2
-            GROUP BY model_name
+            FROM (
+                SELECT DISTINCT ON (item_id)
+                    item_id,
+                    champion_method
+                FROM analytics.item_champion
+                WHERE horizon = $1
+                ORDER BY item_id, decided_at DESC
+            ) latest_champions
+            GROUP BY champion_method
             ORDER BY count DESC
             """,
-            resolved_run_id,
             horizon,
         )
         

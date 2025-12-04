@@ -40,6 +40,48 @@ router = APIRouter(
 )
 
 
+@router.get("/items")
+async def get_category_items(
+    connection: asyncpg.Connection = Depends(get_db_connection),
+) -> dict[str, list[str]]:
+    """
+    Return items grouped by category.
+    
+    This endpoint supports US #15: Category-Level Demand Insights.
+    """
+    
+    try:
+        # Get all items with their categories
+        records = await connection.fetch(
+            """
+            SELECT 
+                COALESCE(category, 'Other') as category,
+                item_id
+            FROM core.dim_item
+            ORDER BY category, item_id
+            """
+        )
+        
+        # Group items by category
+        category_items: dict[str, list[str]] = {}
+        for record in records:
+            category = record["category"]
+            item_id = record["item_id"]
+            
+            if category not in category_items:
+                category_items[category] = []
+            
+            category_items[category].append(item_id)
+        
+        return category_items
+        
+    except asyncpg.exceptions.UndefinedTableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Item tables are not available in the database.",
+        ) from exc
+
+
 def _extract_category_from_item_id(item_id: str) -> str:
     """
     Extract category from item ID.
