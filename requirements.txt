@@ -1,11 +1,12 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.4
 asyncpg==0.29.0
-numpy==1.26.4
-pandas==2.2.2
-scipy==1.11.4
+numpy>=1.26.0,<2.0.0
+pandas>=2.2.0,<3.0.0
+scipy>=1.11.0,<2.0.0
 statsforecast==1.6.0
 python-dateutil==2.8.2
 pydantic==2.5.0
+python-dotenv==1.0.0
 
 
