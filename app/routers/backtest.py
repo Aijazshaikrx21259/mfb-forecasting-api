@@ -334,10 +334,17 @@ async def read_backtest_summary(
     try:
         records = await connection.fetch(
             """
-            SELECT *
-            FROM analytics.backtest_overall_summary
-            WHERE run_id = $1
-            ORDER BY horizon_months
+            SELECT 
+                bos.*,
+                COALESCE(
+                    (SELECT MAX(decided_at) 
+                     FROM analytics.item_champion 
+                     WHERE horizon = bos.horizon_months),
+                    bos.created_at
+                ) as latest_update
+            FROM analytics.backtest_overall_summary bos
+            WHERE bos.run_id = $1
+            ORDER BY bos.horizon_months
             """,
             resolved_run_id,
         )
@@ -367,7 +374,7 @@ async def read_backtest_summary(
                 mean_mape=_decimal_to_float(record.get("mean_mape")),
                 mean_rmse=_decimal_to_float(record.get("mean_rmse")),
                 run_id=record["run_id"],
-                created_at=record["created_at"],
+                created_at=record["latest_update"],  # Use latest champion selection date
             )
         )
 
