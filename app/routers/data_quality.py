@@ -74,6 +74,26 @@ class CandidateResponse(BaseModel):
     detected_at_utc: datetime
 
 
+class DataTreatmentSummary(BaseModel):
+    """Before/after data treatment metrics."""
+    total_item_months: int
+    flagged_item_months: int
+    clean_item_months: int
+    exclusion_rate: float  # percentage
+    items_affected: int
+
+
+class ActionableInsight(BaseModel):
+    """Actionable insight with priority and recommendation."""
+    priority: str  # HIGH, MEDIUM, LOW
+    issue_type: str
+    count: int
+    title: str
+    description: str
+    impact: str
+    recommended_action: str
+
+
 class QualitySummaryResponse(BaseModel):
     """Comprehensive data quality summary for US #21."""
     total_flags: int
@@ -84,6 +104,8 @@ class QualitySummaryResponse(BaseModel):
     recent_issues: list[MonthFlagResponse]
     data_completeness_score: float  # 0-100
     quality_score: float  # 0-100
+    data_treatment: DataTreatmentSummary
+    actionable_insights: list[ActionableInsight]
 
 
 router = APIRouter(
@@ -101,6 +123,104 @@ def _determine_flag_level(agency_internal_id: str | None, item_id: str | None) -
     if item_id:
         return "ITEM"
     return "GLOBAL"
+
+
+def _generate_actionable_insights(
+    flags_by_type: dict[str, int],
+    active_flags: int,
+    items_affected: int,
+    exclusion_rate: float,
+) -> list[ActionableInsight]:
+    """Generate prioritized actionable insights based on data quality issues."""
+    insights: list[ActionableInsight] = []
+    
+    # Define issue type metadata
+    issue_metadata = {
+        "ANOMALY": {
+            "title": "Volume Anomalies Detected",
+            "description": "Demand patterns show unusual spikes or drops (>70% deviation from baseline)",
+            "impact": f"May cause forecast inaccuracy if anomalies represent one-time events rather than trend changes",
+            "action": "Review flagged items to determine if anomalies are data errors, one-time events, or genuine demand shifts",
+            "priority_threshold": 100,
+        },
+        "BAD_DATA": {
+            "title": "Data Quality Issues Found",
+            "description": "Source system changes, negative values, or inconsistent data detected",
+            "impact": f"Unreliable data will produce unreliable forecasts and may exclude items from predictions",
+            "action": "Investigate data source issues and correct upstream data collection problems",
+            "priority_threshold": 50,
+        },
+        "STOCKOUT": {
+            "title": "Potential Stockouts Identified",
+            "description": "Items with sustained demand suddenly dropped to zero quantity",
+            "impact": f"Stockouts can be misinterpreted as demand decline, leading to under-forecasting",
+            "action": "Verify if zero-demand periods are true stockouts and flag them to prevent forecast bias",
+            "priority_threshold": 20,
+        },
+        "MANUAL_EXCLUDE": {
+            "title": "Manual Exclusions Active",
+            "description": "Items or periods manually excluded from forecasting",
+            "impact": f"Reduces available training data and may affect forecast coverage",
+            "action": "Review manual exclusions periodically to ensure they're still necessary",
+            "priority_threshold": 30,
+        },
+    }
+    
+    # Generate insights for each issue type
+    for issue_type, count in sorted(flags_by_type.items(), key=lambda x: x[1], reverse=True):
+        if count == 0:
+            continue
+            
+        metadata = issue_metadata.get(issue_type, {
+            "title": f"{issue_type} Issues",
+            "description": f"{count} issues of type {issue_type} detected",
+            "impact": "May affect forecast quality",
+            "action": "Review and resolve these issues",
+            "priority_threshold": 50,
+        })
+        
+        # Determine priority
+        if count >= metadata["priority_threshold"]:
+            priority = "HIGH"
+        elif count >= metadata["priority_threshold"] // 2:
+            priority = "MEDIUM"
+        else:
+            priority = "LOW"
+        
+        insights.append(ActionableInsight(
+            priority=priority,
+            issue_type=issue_type,
+            count=count,
+            title=metadata["title"],
+            description=metadata["description"],
+            impact=metadata["impact"],
+            recommended_action=metadata["action"],
+        ))
+    
+    # Add overall health insight if no issues
+    if active_flags == 0:
+        insights.append(ActionableInsight(
+            priority="LOW",
+            issue_type="HEALTHY",
+            count=0,
+            title="Data Quality: Excellent",
+            description="All data quality checks are passing",
+            impact="Your data is clean and ready for accurate forecasting",
+            recommended_action="Continue monitoring data quality with each new data load",
+        ))
+    elif exclusion_rate > 20:
+        # Add high exclusion rate warning
+        insights.insert(0, ActionableInsight(
+            priority="HIGH",
+            issue_type="HIGH_EXCLUSION",
+            count=int(exclusion_rate),
+            title=f"High Data Exclusion Rate ({exclusion_rate:.1f}%)",
+            description=f"{items_affected} items affected by quality flags, excluding significant training data",
+            impact="Reduced training data may lead to less accurate forecasts and limited item coverage",
+            recommended_action="Prioritize resolving data quality issues to maximize available training data",
+        ))
+    
+    return insights
 
 
 async def _fetch_flag_record(record: asyncpg.Record | None) -> MonthFlagResponse:
@@ -330,27 +450,50 @@ async def get_quality_summary(
         
         recent_issues = [MonthFlagResponse(**dict(record)) for record in recent_records]
         
-        # Calculate data completeness score (simplified)
-        # Higher is better, based on ratio of clean data to flagged data
-        completeness_record = await connection.fetchrow(
+        # Get data treatment metrics (before/after)
+        treatment_metrics = await connection.fetchrow(
             """
             SELECT 
-                COUNT(DISTINCT month_key || '-' || COALESCE(item_id, 'ALL')) as total_records
-            FROM analytics.month_quality_flag
-            WHERE is_active = TRUE
+                COUNT(DISTINCT item_id || '-' || month_key) as total_item_months,
+                COUNT(DISTINCT CASE 
+                    WHEN EXISTS (
+                        SELECT 1 FROM analytics.month_quality_flag f 
+                        WHERE f.is_active = TRUE 
+                        AND f.month_key = a.month_key 
+                        AND (f.item_id = a.item_id OR f.item_id IS NULL)
+                    ) THEN item_id || '-' || month_key 
+                END) as flagged_item_months,
+                COUNT(DISTINCT item_id) as total_items
+            FROM analytics.item_agency_monthly_actuals a
             """
         )
         
-        flagged_records = completeness_record["total_records"] if completeness_record else 0
+        total_item_months = treatment_metrics["total_item_months"] if treatment_metrics else 0
+        flagged_item_months = treatment_metrics["flagged_item_months"] if treatment_metrics else 0
+        clean_item_months = max(0, total_item_months - flagged_item_months)
+        exclusion_rate = (flagged_item_months / total_item_months * 100) if total_item_months > 0 else 0.0
         
-        # Assume we have ~1000 total item-months (this is a simplified calculation)
-        # In production, you'd query the actual data table
-        estimated_total = 1000
-        data_completeness_score = max(0.0, min(100.0, ((estimated_total - flagged_records) / estimated_total) * 100))
+        # Count unique items affected by flags
+        items_affected_count = await connection.fetchval(
+            """
+            SELECT COUNT(DISTINCT item_id)
+            FROM analytics.month_quality_flag
+            WHERE is_active = TRUE AND item_id IS NOT NULL
+            """
+        ) or 0
         
-        # Calculate overall quality score
-        # Based on: fewer active flags = higher score
-        quality_score = max(0.0, min(100.0, 100 - (active_flags * 0.5)))  # Each flag reduces score by 0.5
+        # Calculate data completeness score
+        data_completeness_score = max(0.0, min(100.0, (clean_item_months / total_item_months * 100) if total_item_months > 0 else 100.0))
+        
+        # Calculate overall quality score (fixed: 100% when no issues)
+        if active_flags == 0:
+            quality_score = 100.0
+        else:
+            # Deduct based on exclusion rate and issue severity
+            quality_score = max(0.0, 100.0 - exclusion_rate - (active_flags * 0.01))
+        
+        # Generate actionable insights
+        insights = _generate_actionable_insights(flags_by_type, active_flags, items_affected_count, exclusion_rate)
         
     except asyncpg.exceptions.UndefinedTableError as exc:
         raise HTTPException(
@@ -367,6 +510,14 @@ async def get_quality_summary(
         recent_issues=recent_issues,
         data_completeness_score=data_completeness_score,
         quality_score=quality_score,
+        data_treatment=DataTreatmentSummary(
+            total_item_months=int(total_item_months),
+            flagged_item_months=int(flagged_item_months),
+            clean_item_months=int(clean_item_months),
+            exclusion_rate=round(exclusion_rate, 2),
+            items_affected=int(items_affected_count),
+        ),
+        actionable_insights=insights,
     )
 
 
