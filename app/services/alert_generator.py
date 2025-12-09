@@ -23,8 +23,8 @@ async def generate_purchase_alerts(
         Number of alerts created
     """
     
-    # Get top 10 items by forecast quantity
-    top_items = await connection.fetch("""
+    # Get items that need purchasing (forecast > 0, indicating demand)
+    purchase_items = await connection.fetch("""
         SELECT 
             item_id,
             p50 as forecast_qty,
@@ -32,19 +32,20 @@ async def generate_purchase_alerts(
         FROM analytics.forecast_item_month
         WHERE run_id = $1
         AND horizon_months = 1
-        AND p50 IS NOT NULL
+        AND p50 > 0
         ORDER BY p50 DESC
-        LIMIT 10
     """, run_id)
     
-    if not top_items:
+    if not purchase_items:
         return 0
     
+    # Get top 10 for the digest
+    top_items = purchase_items[:10]
     total_qty = sum(item['forecast_qty'] for item in top_items)
     item_list = ', '.join([item['item_id'] for item in top_items[:5]])
     
-    # Get high-demand items (potential stockout risk)
-    high_demand_items = [item for item in top_items if item['forecast_qty'] > 1000]
+    # All items with forecast > 0 are potential stockout risks if not ordered
+    high_demand_items = purchase_items
     
     # If no user_ids provided, get all active users or use a default
     if not user_ids:
