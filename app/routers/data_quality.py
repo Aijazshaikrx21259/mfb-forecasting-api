@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 from uuid import UUID
@@ -14,6 +14,10 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.db import get_db_connection
 from app.security import verify_api_key
+
+# Simple in-memory cache for data quality summary
+_CACHE: dict[str, tuple[datetime, Any]] = {}
+_CACHE_TTL = timedelta(minutes=5)  # Cache for 5 minutes
 
 
 class FlagType(str, Enum):
@@ -389,6 +393,14 @@ async def get_quality_summary(
     This endpoint supports US #21: Data Quality Monitoring Report.
     """
     
+    # Check cache first
+    cache_key = "quality_summary"
+    now = datetime.utcnow()
+    if cache_key in _CACHE:
+        cached_time, cached_data = _CACHE[cache_key]
+        if now - cached_time < _CACHE_TTL:
+            return cached_data
+    
     try:
         # Get total and active flags count
         flag_counts = await connection.fetchrow(
@@ -450,21 +462,42 @@ async def get_quality_summary(
         
         recent_issues = [MonthFlagResponse(**dict(record)) for record in recent_records]
         
-        # Get data treatment metrics (before/after)
+        # Get data treatment metrics (before/after) - OPTIMIZED
         treatment_metrics = await connection.fetchrow(
             """
+            WITH flagged_data AS (
+                SELECT DISTINCT 
+                    month_key,
+                    item_id
+                FROM analytics.month_quality_flag
+                WHERE is_active = TRUE
+            ),
+            actuals_summary AS (
+                SELECT 
+                    COUNT(DISTINCT item_id || '-' || month_key) as total_item_months,
+                    COUNT(DISTINCT item_id) as total_items
+                FROM analytics.item_agency_monthly_actuals
+            ),
+            flagged_summary AS (
+                SELECT COUNT(DISTINCT 
+                    CASE 
+                        WHEN f.item_id IS NOT NULL THEN a.item_id || '-' || a.month_key
+                        ELSE a.item_id || '-' || a.month_key
+                    END
+                ) as flagged_item_months
+                FROM analytics.item_agency_monthly_actuals a
+                LEFT JOIN flagged_data f ON (
+                    a.month_key = f.month_key 
+                    AND (a.item_id = f.item_id OR f.item_id IS NULL)
+                )
+                WHERE f.month_key IS NOT NULL
+            )
             SELECT 
-                COUNT(DISTINCT item_id || '-' || month_key) as total_item_months,
-                COUNT(DISTINCT CASE 
-                    WHEN EXISTS (
-                        SELECT 1 FROM analytics.month_quality_flag f 
-                        WHERE f.is_active = TRUE 
-                        AND f.month_key = a.month_key 
-                        AND (f.item_id = a.item_id OR f.item_id IS NULL)
-                    ) THEN item_id || '-' || month_key 
-                END) as flagged_item_months,
-                COUNT(DISTINCT item_id) as total_items
-            FROM analytics.item_agency_monthly_actuals a
+                a.total_item_months,
+                COALESCE(f.flagged_item_months, 0) as flagged_item_months,
+                a.total_items
+            FROM actuals_summary a
+            CROSS JOIN flagged_summary f
             """
         )
         
@@ -501,7 +534,7 @@ async def get_quality_summary(
             detail="Data quality tables are not available in the database.",
         ) from exc
     
-    return QualitySummaryResponse(
+    response = QualitySummaryResponse(
         total_flags=int(total_flags),
         active_flags=int(active_flags),
         flags_by_type=flags_by_type,
@@ -519,5 +552,10 @@ async def get_quality_summary(
         ),
         actionable_insights=insights,
     )
+    
+    # Cache the response
+    _CACHE[cache_key] = (now, response)
+    
+    return response
 
 
